@@ -1,3 +1,5 @@
+Desktop EXE build and startup dependency flow: see DESKTOP_EXE.md
+
 README.md - Full workflow explanation
 1_mmf_download_metadata.sh - Get JSON metadata
 2_mmf_download_stl_files.sh - Get actual files

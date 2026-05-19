@@ -1,0 +1,89 @@
+{
+  "name": "mmf-bulk-downloader-desktop",
+  "version": "1.0.0",
+  "description": "Desktop GUI + dependency bootstrapper for MyMiniFactory bulk downloader scripts",
+  "main": "electron/main.js",
+  "author": "MMF Bulk Downloader",
+  "license": "MIT",
+  "scripts": {
+    "icons:generate": "node scripts/generate-icons.js",
+    "dev": "electron .",
+    "start": "electron .",
+    "pack": "npm run icons:generate && electron-builder --dir",
+    "dist": "npm run icons:generate && electron-builder",
+    "dist:win": "npm run icons:generate && electron-builder --win nsis",
+    "dist:mac": "npm run icons:generate && electron-builder --mac dmg zip"
+  },
+  "build": {
+    "appId": "com.mmfbulkdownloader.app",
+    "productName": "MyMiniFactory Bulk Downloader",
+    "asar": true,
+    "asarUnpack": [
+      "*.sh",
+      "*.ps1",
+      "build/**/*"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "gui/**/*",
+      "build/**/*",
+      "*.sh",
+      "*.ps1",
+      "*.md",
+      "LICENSE",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.utilities",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "perMachine": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    }
+  },
+  "devDependencies": {
+    "@fiahfy/icns": "^0.0.7",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.34.5"
+  }
+}

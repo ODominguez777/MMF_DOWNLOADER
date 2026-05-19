@@ -21,10 +21,14 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # UPDATE THIS: Get your cookie from browser developer tools (F12 -> Network -> Copy Cookie header)
-COOKIE='REPLACE_WITH_YOUR_ACTUAL_COOKIE_STRING'
+COOKIE="${MMF_COOKIE:-REPLACE_WITH_YOUR_ACTUAL_COOKIE_STRING}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODEL_IDS_FILE="${MMF_MODEL_IDS_PATH:-${SCRIPT_DIR}/model_ids.txt}"
+DOWNLOAD_ROOT="${MMF_DOWNLOAD_ROOT:-${SCRIPT_DIR}/downloads}"
 
 # Check if model_ids.txt exists
-if [[ ! -f "model_ids.txt" ]]; then
+if [[ ! -f "$MODEL_IDS_FILE" ]]; then
     echo -e "${RED}Error: model_ids.txt not found!${NC}"
     echo "Create a file with one model ID per line, like:"
     echo "409352"
@@ -34,21 +38,26 @@ if [[ ! -f "model_ids.txt" ]]; then
 fi
 
 # Create downloads directory
-mkdir -p downloads
-cd downloads || exit
+mkdir -p "$DOWNLOAD_ROOT"
+cd "$DOWNLOAD_ROOT" || exit
 
 # Fix Windows line endings if present (common issue)
-if grep -q $'\r' ../model_ids.txt; then
+if grep -q $'\r' "$MODEL_IDS_FILE"; then
     echo -e "${BLUE}Fixing Windows line endings in model_ids.txt...${NC}"
-    sed -i 's/\r$//' ../model_ids.txt
+    sed -i 's/\r$//' "$MODEL_IDS_FILE"
 fi
 
 # Count total models
-total=$(wc -l < ../model_ids.txt)
+total=$(grep -cve '^[[:space:]]*$' "$MODEL_IDS_FILE")
+if [[ "$total" -eq 0 ]]; then
+    echo -e "${RED}Error: model_ids.txt is empty.${NC}"
+    exit 1
+fi
+
 current=0
 
 echo -e "${BLUE}Starting download of $total model metadata files...${NC}"
-echo "JSON files will be saved in the 'downloads' directory"
+echo "JSON files will be saved in: $DOWNLOAD_ROOT"
 echo "Rate limited to 20 requests per minute (3 second delay between requests)"
 echo ""
 
@@ -91,11 +100,11 @@ while read -r id; do
         sleep 3
     fi
     
-done < ../model_ids.txt
+done < "$MODEL_IDS_FILE"
 
 echo ""
 echo -e "${GREEN}Metadata download complete!${NC}"
-echo "Downloaded files are in the 'downloads' directory"
+echo "Downloaded files are in: $DOWNLOAD_ROOT"
 echo "Total JSON files: $(ls -1 model_*.json 2>/dev/null | wc -l)"
 echo ""
 echo -e "${BLUE}Next step: Use the STL downloader script to get actual 3D files${NC}"

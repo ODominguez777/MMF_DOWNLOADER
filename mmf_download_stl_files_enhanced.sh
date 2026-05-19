@@ -55,7 +55,7 @@ NC='\033[0m' # No Color
 # - Various _ga and _pk tracking cookies
 #
 # If you're missing cf_clearance, you'll get "enable Javascript" errors
-COOKIE='REPLACE_WITH_YOUR_ACTUAL_COOKIE_STRING'
+COOKIE="${MMF_COOKIE:-REPLACE_WITH_YOUR_ACTUAL_COOKIE_STRING}"
 # ============================================================================
 
 # Configuration
@@ -87,7 +87,7 @@ validate_cookie() {
         return 1
     fi
     
-    echo -e "${GREEN}✓ Cookie format looks valid${NC}"
+    echo -e "${GREEN}[OK] Cookie format looks valid${NC}"
     return 0
 }
 
@@ -114,9 +114,208 @@ show_error_content() {
     head -20 "$file" | sed 's/^/  /'
 }
 
-echo -e "${CYAN}╔════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║   MyMiniFactory STL Downloader - Enhanced Edition     ║${NC}"
-echo -e "${CYAN}╚════════════════════════════════════════════════════════╝${NC}"
+get_file_size() {
+    local file="$1"
+    stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo "unknown"
+}
+
+sanitize_filename() {
+    local original_name="$1"
+    local sanitized_name
+    sanitized_name=$(printf "%s" "$original_name" | tr '/\\:*?"<>|' '_')
+    sanitized_name=$(printf "%s" "$sanitized_name" | tr -d '\r\n')
+    sanitized_name="${sanitized_name## }"
+    sanitized_name="${sanitized_name%% }"
+
+    if [[ -z "$sanitized_name" ]]; then
+        sanitized_name="unnamed_file"
+    fi
+
+    printf "%s" "$sanitized_name"
+}
+
+unique_output_path() {
+    local base_dir="$1"
+    local target_name="$2"
+    local candidate_path="${base_dir}/${target_name}"
+
+    if [[ ! -e "$candidate_path" ]]; then
+        printf "%s" "$candidate_path"
+        return
+    fi
+
+    local suffix=1
+    local name_without_ext="$target_name"
+    local extension=""
+
+    if [[ "$target_name" == *.* ]]; then
+        name_without_ext="${target_name%.*}"
+        extension=".${target_name##*.}"
+    fi
+
+    while true; do
+        candidate_path="${base_dir}/${name_without_ext}_${suffix}${extension}"
+        if [[ ! -e "$candidate_path" ]]; then
+            printf "%s" "$candidate_path"
+            return
+        fi
+        suffix=$((suffix + 1))
+    done
+}
+
+write_compact_model_json() {
+    local source_json="$1"
+    local model_dir="$2"
+    local model_id="$3"
+    local output_json="${model_dir}/model_${model_id}.json"
+
+    if $JQ_CMD '{
+        name: (.name // ""),
+        description: (.description // ""),
+        tags: (
+            if .tags == null then []
+            elif (.tags | type) == "array" then .tags
+            else [ .tags ]
+            end
+        ),
+        price: (
+            if .price == null or .price == "" then 5
+            elif (.price | type) == "number" then .price
+            elif (.price | type) == "string" then ((.price | tonumber?) // 5)
+            else 5
+            end
+        )
+    }' "$source_json" > "$output_json"; then
+        echo -e "  ${GREEN}[OK] Wrote compact JSON: model_${model_id}.json${NC}"
+        return 0
+    fi
+
+    echo -e "  ${RED}[FAIL] Failed to build compact JSON for model $model_id${NC}"
+    printf '{"name":"","description":"","tags":[],"price":5}\n' > "$output_json"
+    return 1
+}
+
+download_model_images() {
+    local source_json="$1"
+    local model_dir="$2"
+
+    local image_data
+    image_data=$($JQ_CMD -r '.images[]? | "\((.is_primary // false) | tostring)|\(.original.url // "")"' "$source_json" 2>/dev/null)
+
+    if [[ -z "$image_data" ]]; then
+        echo -e "  ${YELLOW}! No images with original URL found${NC}"
+        return 0
+    fi
+
+    local images_dir="${model_dir}/images"
+    mkdir -p "$images_dir"
+
+    local image_index=0
+
+    while IFS='|' read -r is_primary image_url; do
+        if [[ -z "$image_url" ]]; then
+            continue
+        fi
+
+        image_index=$((image_index + 1))
+        total_downloads=$((total_downloads + 1))
+
+        image_url=$(echo "$image_url" | tr -d '\r' | xargs)
+        local url_without_query="${image_url%%\?*}"
+        local original_name
+        original_name=$(basename "$url_without_query")
+
+        if [[ -z "$original_name" ]]; then
+            original_name="image_${image_index}.bin"
+        fi
+
+        local target_name
+        if [[ "$is_primary" == "true" ]]; then
+            local extension=""
+            if [[ "$original_name" == *.* ]]; then
+                extension=".${original_name##*.}"
+            fi
+            target_name="thumbnail_image${extension}"
+        else
+            target_name="$original_name"
+        fi
+
+        target_name=$(sanitize_filename "$target_name")
+        local output_path
+        output_path=$(unique_output_path "$images_dir" "$target_name")
+
+        echo -e "  ${YELLOW}Downloading image: $(basename "$output_path")${NC}"
+
+        curl --silent -L \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0" \
+            -H "Accept: image/*,*/*;q=0.8" \
+            -H "Cookie: $COOKIE" \
+            --compressed \
+            "$image_url" \
+            -o "$output_path"
+
+        if [[ -f "$output_path" ]] && [[ -s "$output_path" ]]; then
+            if is_html_error "$output_path"; then
+                echo -e "  ${RED}[FAIL] Failed image download: received HTML error page${NC}"
+                rm -f "$output_path"
+            else
+                local image_size
+                image_size=$(get_file_size "$output_path")
+                echo -e "  ${GREEN}[OK] Downloaded image $(basename "$output_path") (${image_size} bytes)${NC}"
+                successful_downloads=$((successful_downloads + 1))
+            fi
+        else
+            echo -e "  ${RED}[FAIL] Failed to download image $(basename "$output_path")${NC}"
+            rm -f "$output_path"
+        fi
+
+        sleep 1
+    done <<< "$image_data"
+}
+
+compress_non_json_assets() {
+    local model_dir="$1"
+    local archive_name="assets.zip"
+    local archive_path="${model_dir}/${archive_name}"
+    local -a files_to_zip=()
+
+    while IFS= read -r file_path; do
+        files_to_zip+=("$(basename "$file_path")")
+    done < <(find "$model_dir" -maxdepth 1 -type f ! -name "*.json" ! -name "$archive_name")
+
+    if [[ ${#files_to_zip[@]} -eq 0 ]]; then
+        echo -e "  ${YELLOW}! No non-JSON files to compress${NC}"
+        return 0
+    fi
+
+    rm -f "$archive_path"
+
+    if command -v zip >/dev/null 2>&1; then
+        (cd "$model_dir" && zip -q "$archive_name" "${files_to_zip[@]}")
+    elif command -v tar >/dev/null 2>&1; then
+        (cd "$model_dir" && tar -a -cf "$archive_name" "${files_to_zip[@]}")
+    else
+        echo -e "  ${RED}[FAIL] Could not compress files: zip/tar not found${NC}"
+        return 1
+    fi
+
+    if [[ -f "$archive_path" ]] && [[ -s "$archive_path" ]]; then
+        for file_name in "${files_to_zip[@]}"; do
+            rm -f "${model_dir}/${file_name}"
+        done
+        local zip_size
+        zip_size=$(get_file_size "$archive_path")
+        echo -e "  ${GREEN}[OK] Created assets.zip (${zip_size} bytes)${NC}"
+        return 0
+    fi
+
+    echo -e "  ${RED}[FAIL] Failed to create assets.zip${NC}"
+    return 1
+}
+
+echo -e "${CYAN}========================================================${NC}"
+echo -e "${CYAN}   MyMiniFactory STL Downloader - Enhanced Edition     ${NC}"
+echo -e "${CYAN}========================================================${NC}"
 echo ""
 
 # Validate cookie before doing anything else
@@ -162,16 +361,16 @@ echo -e "${BLUE}Found $json_count JSON files to process${NC}"
 
 # TEST MODE - Download just one file to verify everything works
 if [[ "$TEST_MODE" == true ]]; then
-    echo -e "${YELLOW}═══════════════════════════════════════${NC}"
+    echo -e "${YELLOW}=======================================${NC}"
     echo -e "${YELLOW}   RUNNING IN TEST MODE${NC}"
-    echo -e "${YELLOW}═══════════════════════════════════════${NC}"
+    echo -e "${YELLOW}=======================================${NC}"
     echo "Testing with first available model to verify cookie and setup..."
     echo ""
     
     # Find first JSON file with download URLs
     for json_file in ../model_*.json; do
         model_id=$(basename "$json_file" | sed 's/model_//; s/.json//')
-        download_data=$($JQ_CMD -r '.files.items[] | "\(.filename)|\(.download_url)"' "$json_file" 2>/dev/null)
+        download_data=$($JQ_CMD -r '.files.items[]? | "\(.filename // "")|\(.download_url // "")"' "$json_file" 2>/dev/null)
         
         if [[ -n "$download_data" ]]; then
             echo -e "${BLUE}Testing with model $model_id${NC}"
@@ -195,7 +394,7 @@ if [[ "$TEST_MODE" == true ]]; then
             echo ""
             
             if is_html_error "$test_file"; then
-                echo -e "${RED}✗ TEST FAILED${NC}"
+                echo -e "${RED}[FAIL] TEST FAILED${NC}"
                 echo -e "${RED}Downloaded file is an HTML error page, not the actual file${NC}"
                 echo ""
                 show_error_content "$test_file"
@@ -209,14 +408,14 @@ if [[ "$TEST_MODE" == true ]]; then
                 echo -e "${CYAN}How to get a fresh cookie:${NC}"
                 echo "  1. Open MyMiniFactory in browser, log in"
                 echo "  2. Download any file from any model"
-                echo "  3. F12 → Network → Find 'download' request"
+                echo "  3. F12 -> Network -> Find 'download' request"
                 echo "  4. Copy the Cookie header value"
                 echo "  5. Paste into script (no extra quotes)"
                 rm -f "$test_file"
                 exit 1
             else
                 file_size=$(stat -c%s "$test_file" 2>/dev/null || stat -f%z "$test_file" 2>/dev/null || echo "unknown")
-                echo -e "${GREEN}✓ TEST PASSED${NC}"
+                echo -e "${GREEN}[OK] TEST PASSED${NC}"
                 echo -e "  Successfully downloaded ${CYAN}$filename${NC} (${file_size} bytes)"
                 echo "  File appears to be valid (not an error page)"
                 echo ""
@@ -233,7 +432,7 @@ if [[ "$TEST_MODE" == true ]]; then
 fi
 
 # FULL DOWNLOAD MODE
-echo -e "${BLUE}Extracting download URLs and downloading STL/ZIP files...${NC}"
+echo -e "${BLUE}Extracting download URLs, images, and creating per-model ZIP files...${NC}"
 echo -e "${YELLOW}This will take a while - respecting rate limits${NC}"
 echo -e "${YELLOW}Press Ctrl+C to stop at any time${NC}"
 echo ""
@@ -242,39 +441,45 @@ current_file=0
 total_downloads=0
 successful_downloads=0
 consecutive_failures=0
+compact_json_written=0
+zip_created=0
 
 # Process each JSON file
 for json_file in ../model_*.json; do
     current_file=$((current_file + 1))
     model_id=$(basename "$json_file" | sed 's/model_//; s/.json//')
-    
+
     echo -e "${BLUE}[$current_file/$json_count] Processing model $model_id...${NC}"
-    
-    # Extract download URLs and filenames using jq
-    download_data=$($JQ_CMD -r '.files.items[] | "\(.filename)|\(.download_url)"' "$json_file" 2>/dev/null)
-    
-    if [[ -z "$download_data" ]]; then
-        echo -e "${RED}  ✗ No download URLs found in $json_file${NC}"
-        continue
-    fi
-    
+
     # Create directory for this model
     model_dir="model_${model_id}"
     mkdir -p "$model_dir"
-    
-    # Download each file
-    while IFS='|' read -r filename download_url; do
-        if [[ -n "$filename" && -n "$download_url" ]]; then
-            # Clean carriage returns and whitespace (Windows line ending fix)
+
+    # Build compact JSON with only required fields
+    if write_compact_model_json "$json_file" "$model_dir" "$model_id"; then
+        compact_json_written=$((compact_json_written + 1))
+    fi
+
+    # Extract downloadable files from metadata
+    download_data=$($JQ_CMD -r '.files.items[]? | "\(.filename // "")|\(.download_url // "")"' "$json_file" 2>/dev/null)
+
+    if [[ -z "$download_data" ]]; then
+        echo -e "${YELLOW}  ! No STL/ZIP file URLs found in metadata${NC}"
+    else
+        while IFS='|' read -r filename download_url; do
+            if [[ -z "$filename" || -z "$download_url" ]]; then
+                continue
+            fi
+
             filename=$(echo "$filename" | tr -d '\r' | xargs)
+            filename=$(sanitize_filename "$filename")
             download_url=$(echo "$download_url" | tr -d '\r' | xargs)
-            
+
             total_downloads=$((total_downloads + 1))
-            output_file="${model_dir}/${filename}"
-            
-            echo -e "  ${YELLOW}Downloading: $filename${NC}"
-            
-            # Download with redirect following and proper headers
+            output_file="$(unique_output_path "$model_dir" "$filename")"
+
+            echo -e "  ${YELLOW}Downloading file: $(basename "$output_file")${NC}"
+
             curl --silent -L \
                 -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0" \
                 -H "Accept: application/octet-stream" \
@@ -282,27 +487,23 @@ for json_file in ../model_*.json; do
                 --compressed \
                 "$download_url" \
                 -o "$output_file"
-            
-            # Check if download was successful
+
             if [[ -f "$output_file" ]] && [[ -s "$output_file" ]]; then
-                # Check if we got an HTML error page instead of actual file
                 if is_html_error "$output_file"; then
-                    echo -e "  ${RED}✗ Failed: Downloaded HTML error page instead of file${NC}"
+                    echo -e "  ${RED}[FAIL] Failed: Downloaded HTML error page instead of file${NC}"
                     consecutive_failures=$((consecutive_failures + 1))
-                    
-                    # Show error content for first failure
+
                     if [[ $consecutive_failures -eq 1 ]]; then
                         show_error_content "$output_file"
                     fi
-                    
+
                     rm -f "$output_file"
-                    
-                    # Stop if too many consecutive failures
+
                     if [[ $consecutive_failures -ge $MAX_CONSECUTIVE_FAILURES ]]; then
                         echo ""
-                        echo -e "${RED}═══════════════════════════════════════════════════════${NC}"
+                        echo -e "${RED}=======================================================${NC}"
                         echo -e "${RED}STOPPING: $MAX_CONSECUTIVE_FAILURES consecutive failures detected${NC}"
-                        echo -e "${RED}═══════════════════════════════════════════════════════${NC}"
+                        echo -e "${RED}=======================================================${NC}"
                         echo ""
                         echo -e "${YELLOW}This indicates a systematic problem (not random failures)${NC}"
                         echo ""
@@ -315,24 +516,23 @@ for json_file in ../model_*.json; do
                         echo -e "${CYAN}To fix:${NC}"
                         echo "  1. Log into MyMiniFactory in your browser"
                         echo "  2. Download a file manually to verify access"
-                        echo "  3. Copy fresh cookie from that download request (F12 → Network)"
+                        echo "  3. Copy fresh cookie from that download request (F12 -> Network)"
                         echo "  4. Update COOKIE variable in script"
                         echo "  5. Run in test mode first: bash $(basename "$0") --test"
                         echo ""
                         exit 1
                     fi
                 else
-                    file_size=$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file" 2>/dev/null || echo "unknown")
-                    echo -e "  ${GREEN}✓ Downloaded $filename (${file_size} bytes)${NC}"
+                    file_size=$(get_file_size "$output_file")
+                    echo -e "  ${GREEN}[OK] Downloaded $(basename "$output_file") (${file_size} bytes)${NC}"
                     successful_downloads=$((successful_downloads + 1))
-                    consecutive_failures=0  # Reset on success
+                    consecutive_failures=0
                 fi
             else
-                echo -e "  ${RED}✗ Failed to download $filename${NC}"
+                echo -e "  ${RED}[FAIL] Failed to download $(basename "$output_file")${NC}"
                 consecutive_failures=$((consecutive_failures + 1))
                 rm -f "$output_file"
-                
-                # Stop if too many consecutive failures
+
                 if [[ $consecutive_failures -ge $MAX_CONSECUTIVE_FAILURES ]]; then
                     echo ""
                     echo -e "${RED}STOPPING: Too many consecutive failures${NC}"
@@ -340,28 +540,36 @@ for json_file in ../model_*.json; do
                     exit 1
                 fi
             fi
-            
-            # Rate limiting: sleep for 2 seconds between downloads
+
             sleep 2
-        fi
-    done <<< "$download_data"
-    
+        done <<< "$download_data"
+    fi
+
+    # Download only original images from metadata
+    download_model_images "$json_file" "$model_dir"
+
+    # Compress only model root files to a zip archive; images stay in model_<id>/images
+    if compress_non_json_assets "$model_dir"; then
+        zip_created=$((zip_created + 1))
+    fi
+
     echo ""
 done
 
-echo -e "${GREEN}═══════════════════════════════════════${NC}"
+echo -e "${GREEN}=======================================${NC}"
 echo -e "${GREEN}   Download Complete!${NC}"
-echo -e "${GREEN}═══════════════════════════════════════${NC}"
-echo -e "${GREEN}Successfully downloaded: $successful_downloads/$total_downloads files${NC}"
+echo -e "${GREEN}=======================================${NC}"
+echo -e "${GREEN}Successful downloads: $successful_downloads/$total_downloads files and images${NC}"
 if [[ $((total_downloads - successful_downloads)) -gt 0 ]]; then
-    echo -e "${YELLOW}Failed: $((total_downloads - successful_downloads)) files${NC}"
+    echo -e "${YELLOW}Failed downloads: $((total_downloads - successful_downloads))${NC}"
 fi
-echo -e "${BLUE}Files are organized in the 'stl_files' directory by model ID${NC}"
+echo -e "${GREEN}Compact JSON files written: $compact_json_written${NC}"
+echo -e "${GREEN}ZIP archives created: $zip_created${NC}"
+echo -e "${BLUE}Output structure: stl_files/model_<id>/model_<id>.json + assets.zip + images/${NC}"
 echo ""
 
-# Show sample of downloaded content
-echo "Sample of downloaded directories:"
+echo "Sample of generated directories:"
 find . -name "model_*" -type d 2>/dev/null | head -5 | while read -r dir; do
-    file_count=$(find "$dir" -type f | wc -l)
+    file_count=$(find "$dir" -maxdepth 1 -type f | wc -l)
     echo "  $dir: $file_count files"
 done

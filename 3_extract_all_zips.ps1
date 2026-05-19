@@ -20,12 +20,16 @@
 # Example Windows paths:
 # $BASE_PATH = "C:\Users\YourName\Downloads\MyMiniFactory\downloads\stl_files"
 # $BASE_PATH = "D:\3D Printing\MMF Downloads\downloads\stl_files"
-$BASE_PATH = "PATH\TO\YOUR\downloads\stl_files"
+$BASE_PATH = if ($env:MMF_BASE_PATH) { $env:MMF_BASE_PATH } else { "PATH\TO\YOUR\downloads\stl_files" }
 
 # Choose extraction mode:
 # $EXTRACT_IN_PLACE = $true   -> Extract directly into model folders alongside zips
 # $EXTRACT_IN_PLACE = $false  -> Create separate "_extracted" subdirectories
-$EXTRACT_IN_PLACE = $true
+$EXTRACT_IN_PLACE = if ($env:MMF_EXTRACT_IN_PLACE) {
+    $env:MMF_EXTRACT_IN_PLACE -match '^(?i:true|1|yes)$'
+} else {
+    $true
+}
 # ============================================================================
 
 Write-Host "MyMiniFactory ZIP Extraction Tool" -ForegroundColor Cyan
@@ -83,11 +87,11 @@ foreach ($zip in $zipFiles) {
         # Extract the archive
         Expand-Archive -Path $zip.FullName -DestinationPath $destination -Force -ErrorAction Stop
         
-        Write-Host "  ✓ Extracted to: $destination" -ForegroundColor Green
+        Write-Host "  [OK] Extracted to: $destination" -ForegroundColor Green
         $successful++
         
     } catch {
-        Write-Host "  ✗ Failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  [FAIL] Failed: $($_.Exception.Message)" -ForegroundColor Red
         $failed++
     }
 }

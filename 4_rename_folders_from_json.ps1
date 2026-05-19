@@ -19,19 +19,23 @@
 # ============================================================================
 # Path to directory containing model_*.json files (usually 'downloads')
 # Example: "C:\Users\YourName\Downloads\MyMiniFactory\downloads"
-$JSON_PATH = "PATH\TO\YOUR\downloads"
+$JSON_PATH = if ($env:MMF_JSON_PATH) { $env:MMF_JSON_PATH } else { "PATH\TO\YOUR\downloads" }
 
 # Path to directory containing model_XXXXXX folders to rename (usually 'downloads\stl_files')
 # Example: "C:\Users\YourName\Downloads\MyMiniFactory\downloads\stl_files"
-$FOLDERS_PATH = "PATH\TO\YOUR\downloads\stl_files"
+$FOLDERS_PATH = if ($env:MMF_FOLDERS_PATH) { $env:MMF_FOLDERS_PATH } else { "PATH\TO\YOUR\downloads\stl_files" }
 
 # Naming format options:
 # Format: How to construct the new folder name
 # Options: "ID_NAME" (e.g., 409352_Crystal_Clusters) or "NAME_ONLY" (e.g., Crystal_Clusters)
-$NAMING_FORMAT = "ID_NAME"
+$NAMING_FORMAT = if ($env:MMF_NAMING_FORMAT) { $env:MMF_NAMING_FORMAT } else { "ID_NAME" }
 
 # Maximum name length (to avoid Windows path limits)
-$MAX_NAME_LENGTH = 80
+$MAX_NAME_LENGTH = if ($env:MMF_MAX_NAME_LENGTH) {
+    [Math]::Max(10, [Math]::Min(160, [int]$env:MMF_MAX_NAME_LENGTH))
+} else {
+    80
+}
 # ============================================================================
 
 Write-Host "MyMiniFactory Folder Renaming Tool" -ForegroundColor Cyan
@@ -132,9 +136,9 @@ foreach ($jsonFile in $jsonFiles) {
         }
         
         # Attempt rename
-        Write-Host "[$current/$totalFiles] Renaming: model_$modelId → $newFolderName" -ForegroundColor Cyan
+        Write-Host "[$current/$totalFiles] Renaming: model_$modelId -> $newFolderName" -ForegroundColor Cyan
         Rename-Item -Path $oldFolder -NewName $newFolderName -ErrorAction Stop
-        Write-Host "  ✓ Success" -ForegroundColor Green
+        Write-Host "  [OK] Success" -ForegroundColor Green
         $renamed++
         
     } catch {
@@ -143,7 +147,7 @@ foreach ($jsonFile in $jsonFiles) {
         
         # Provide specific help for common errors
         if ($_.Exception.Message -like "*path or device name*") {
-            Write-Host "  → TIP: Close any Windows Explorer windows viewing this folder and try again" -ForegroundColor Yellow
+            Write-Host "  -> TIP: Close any Windows Explorer windows viewing this folder and try again" -ForegroundColor Yellow
         }
     }
 }
@@ -184,5 +188,5 @@ Get-ChildItem -Path $FOLDERS_PATH -Directory |
 # - NAME_ONLY format is cleaner but may have duplicates if model names aren't unique
 # - Script is safe - it never overwrites existing folders
 # - You can run multiple times; already-renamed folders will be skipped
-# - Names are cleaned automatically: special characters → underscores, length limited
+# - Names are cleaned automatically: special characters -> underscores, length limited
 # - Useful for browsing your library without needing to look up model IDs

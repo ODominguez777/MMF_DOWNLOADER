@@ -23,7 +23,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # UPDATE THIS: Get your cookie from browser developer tools (F12 -> Network -> Copy Cookie header)
-COOKIE='REPLACE_WITH_YOUR_ACTUAL_COOKIE_STRING'
+COOKIE="${MMF_COOKIE:-REPLACE_WITH_YOUR_ACTUAL_COOKIE_STRING}"
 
 # Check if we're in the correct directory (should contain JSON files)
 if ! ls model_*.json 1> /dev/null 2>&1; then
