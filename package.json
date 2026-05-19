@@ -1,9 +1,9 @@
 {
   "name": "mmf-bulk-downloader-desktop",
-  "version": "1.0.0",
-  "description": "Desktop GUI + dependency bootstrapper for MyMiniFactory bulk downloader scripts",
+  "version": "1.1.0",
+  "description": "Desktop GUI + dependency bootstrapper for bulk download scripts",
   "main": "electron/main.js",
-  "author": "MMF Bulk Downloader",
+  "author": "Bulk Downloader",
   "license": "MIT",
   "scripts": {
     "icons:generate": "node scripts/generate-icons.js",
@@ -16,7 +16,7 @@
   },
   "build": {
     "appId": "com.mmfbulkdownloader.app",
-    "productName": "MyMiniFactory Bulk Downloader",
+    "productName": "Bulk Downloader",
     "asar": true,
     "asarUnpack": [
       "*.sh",
@@ -81,7 +81,7 @@
   },
   "devDependencies": {
     "@fiahfy/icns": "^0.0.7",
-    "electron": "^31.0.0",
+    "electron": "^33.2.1",
     "electron-builder": "^24.13.3",
     "png-to-ico": "^3.0.1",
     "sharp": "^0.34.5"

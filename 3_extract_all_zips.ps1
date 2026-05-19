@@ -59,6 +59,60 @@ Write-Host "Found $totalFiles ZIP files to extract" -ForegroundColor Green
 Write-Host "Extraction mode: $(if ($EXTRACT_IN_PLACE) { 'In-place' } else { 'Separate folders' })" -ForegroundColor Cyan
 Write-Host ""
 
+function Test-ZipEntrySafe {
+    param(
+        [string]$EntryName,
+        [string]$DestinationRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($EntryName)) {
+        return $false
+    }
+
+    if ($EntryName -match '\.\.' -or $EntryName -match '^[/\\]' -or $EntryName -match '^[a-zA-Z]:') {
+        return $false
+    }
+
+    $normalizedEntry = $EntryName -replace '\\', '/'
+    $destinationFile = Join-Path $DestinationRoot $normalizedEntry
+    $resolvedDestination = [System.IO.Path]::GetFullPath($destinationFile)
+    $resolvedRoot = [System.IO.Path]::GetFullPath($DestinationRoot)
+
+    return $resolvedDestination.StartsWith($resolvedRoot, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Expand-ZipSafely {
+    param(
+        [string]$ZipPath,
+        [string]$Destination
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+
+    try {
+        foreach ($entry in $archive.Entries) {
+            if ($entry.FullName.EndsWith('/')) {
+                continue
+            }
+
+            if (-not (Test-ZipEntrySafe -EntryName $entry.FullName -DestinationRoot $Destination)) {
+                throw "Unsafe zip entry blocked: $($entry.FullName)"
+            }
+
+            $destinationFile = Join-Path $Destination ($entry.FullName -replace '\\', '/')
+            $destinationDir = Split-Path $destinationFile -Parent
+            if (-not (Test-Path $destinationDir)) {
+                New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
+            }
+
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destinationFile, $true)
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
 $current = 0
 $successful = 0
 $failed = 0
@@ -84,8 +138,7 @@ foreach ($zip in $zipFiles) {
             }
         }
         
-        # Extract the archive
-        Expand-Archive -Path $zip.FullName -DestinationPath $destination -Force -ErrorAction Stop
+        Expand-ZipSafely -ZipPath $zip.FullName -Destination $destination
         
         Write-Host "  [OK] Extracted to: $destination" -ForegroundColor Green
         $successful++

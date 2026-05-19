@@ -18,9 +18,44 @@ if [[ "$EXTRACT_IN_PLACE_RAW" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss])$ ]]; then
     EXTRACT_IN_PLACE="true"
 fi
 
+validate_zip_archive_safe() {
+    local archive_path="$1"
+    local destination_root="$2"
+
+    if ! command -v unzip >/dev/null 2>&1; then
+        echo -e "${RED}ERROR: unzip is required for safe zip validation.${NC}" >&2
+        return 1
+    fi
+
+    local root_full
+    root_full="$(cd "$destination_root" && pwd -P)"
+
+    local entry
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        [[ "$entry" == */ ]] && continue
+        [[ "$entry" == *..* ]] && return 1
+        [[ "$entry" == /* ]] && return 1
+
+        local normalized_entry="${entry//\\//}"
+        local destination_file="${root_full}/${normalized_entry}"
+
+        if [[ "$destination_file" != "$root_full" && "$destination_file" != "$root_full"/* ]]; then
+            return 1
+        fi
+    done < <(unzip -Z1 "$archive_path")
+
+    return 0
+}
+
 extract_zip() {
     local archive_path="$1"
     local destination_path="$2"
+
+    if ! validate_zip_archive_safe "$archive_path" "$destination_path"; then
+        echo -e "${RED}Blocked unsafe zip archive: $(basename "$archive_path")${NC}" >&2
+        return 1
+    fi
 
     if command -v unzip >/dev/null 2>&1; then
         unzip -o -q "$archive_path" -d "$destination_path" >/dev/null 2>&1

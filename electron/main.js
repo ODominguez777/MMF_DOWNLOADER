@@ -1,8 +1,16 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const https = require("https");
 const { spawn, spawnSync } = require("child_process");
+const {
+    openMmfLoginWindow,
+    closeMmfLoginWindow,
+    captureMmfSession,
+    clearMmfBrowserSession,
+    probeMmfSessionCookies
+} = require("./mmf-auth");
+const { resolveOwnCatalog } = require("./mmf-catalog");
 
 const isWindows = process.platform === "win32";
 const isMac = process.platform === "darwin";
@@ -35,11 +43,24 @@ function configureStoragePaths() {
 configureStoragePaths();
 
 const SETTINGS_FILE_NAME = "desktop-settings.json";
+const SECRET_SETTING_KEYS = ["cookie", "medusaJwt", "medusaPublishableKey"];
+const RATE_LIMITS = {
+    metadataDelaySec: 6,
+    stlFileDelaySec: 5,
+    imageDelaySec: 3,
+    medusaApiDelayMs: 2000,
+    catalogPageDelayMs: 1000,
+    catalogBatchSize: 25
+};
+
 const DEFAULT_SETTINGS = {
     cookie: "",
     medusaJwt: "",
     medusaPublishableKey: "",
     modelIdsText: "",
+    modelIdCatalog: [],
+    mmfUsername: "",
+    sessionCapturedAt: "",
     downloadRoot: "",
     testModeCheck: true,
     basePath: "",
@@ -100,6 +121,11 @@ function sanitizeSettings(raw) {
             ? source.medusaPublishableKey.trim()
             : DEFAULT_SETTINGS.medusaPublishableKey,
         modelIdsText: typeof source.modelIdsText === "string" ? source.modelIdsText : DEFAULT_SETTINGS.modelIdsText,
+        modelIdCatalog: sanitizeModelIdCatalog(source.modelIdCatalog),
+        mmfUsername: typeof source.mmfUsername === "string" ? source.mmfUsername.trim() : DEFAULT_SETTINGS.mmfUsername,
+        sessionCapturedAt: typeof source.sessionCapturedAt === "string"
+            ? source.sessionCapturedAt.trim()
+            : DEFAULT_SETTINGS.sessionCapturedAt,
         downloadRoot: typeof source.downloadRoot === "string" ? cleanInputPath(source.downloadRoot) : DEFAULT_SETTINGS.downloadRoot,
         testModeCheck: typeof source.testModeCheck === "boolean" ? source.testModeCheck : DEFAULT_SETTINGS.testModeCheck,
         basePath: typeof source.basePath === "string" ? source.basePath : DEFAULT_SETTINGS.basePath,
@@ -109,6 +135,141 @@ function sanitizeSettings(raw) {
         namingFormat: source.namingFormat === "NAME_ONLY" ? "NAME_ONLY" : "ID_NAME",
         maxNameLength
     };
+}
+
+function sanitizeModelIdCatalog(rawCatalog) {
+    if (!Array.isArray(rawCatalog)) {
+        return [];
+    }
+
+    const seen = new Set();
+    const catalog = [];
+
+    rawCatalog.forEach((entry) => {
+        if (!entry || typeof entry !== "object") {
+            return;
+        }
+
+        const id = String(entry.id || "").trim();
+        if (!/^\d+$/.test(id) || seen.has(id)) {
+            return;
+        }
+
+        seen.add(id);
+        catalog.push({
+            id,
+            name: typeof entry.name === "string" ? entry.name.trim() : ""
+        });
+    });
+
+    return catalog;
+}
+
+function isSecretEncryptionAvailable() {
+    try {
+        return safeStorage.isEncryptionAvailable();
+    } catch (_error) {
+        return false;
+    }
+}
+
+function encryptSecretValue(plainText) {
+    if (!plainText || !isSecretEncryptionAvailable()) {
+        return plainText;
+    }
+
+    const encrypted = safeStorage.encryptString(plainText);
+    return `enc:${encrypted.toString("base64")}`;
+}
+
+function decryptSecretValue(storedValue) {
+    if (typeof storedValue !== "string" || !storedValue) {
+        return "";
+    }
+
+    if (!storedValue.startsWith("enc:")) {
+        return storedValue;
+    }
+
+    if (!isSecretEncryptionAvailable()) {
+        return "";
+    }
+
+    try {
+        const encryptedBuffer = Buffer.from(storedValue.slice(4), "base64");
+        return safeStorage.decryptString(encryptedBuffer);
+    } catch (_error) {
+        return "";
+    }
+}
+
+function decryptSettingsFromDisk(rawSettings) {
+    const source = rawSettings && typeof rawSettings === "object" ? rawSettings : {};
+    const decrypted = { ...source };
+
+    SECRET_SETTING_KEYS.forEach((key) => {
+        if (typeof decrypted[key] === "string") {
+            decrypted[key] = decryptSecretValue(decrypted[key]);
+        }
+    });
+
+    return decrypted;
+}
+
+function encryptSettingsForDisk(settings) {
+    const encrypted = {
+        ...settings,
+        secretsEncrypted: isSecretEncryptionAvailable()
+    };
+
+    SECRET_SETTING_KEYS.forEach((key) => {
+        if (typeof encrypted[key] === "string" && encrypted[key]) {
+            encrypted[key] = encryptSecretValue(encrypted[key]);
+        }
+    });
+
+    return encrypted;
+}
+
+function restrictSettingsFilePermissions() {
+    try {
+        fs.chmodSync(getSettingsFilePath(), 0o600);
+    } catch (_error) {
+        // Best-effort on platforms that support chmod.
+    }
+}
+
+function migratePlaintextSecretsIfNeeded() {
+    if (!isSecretEncryptionAvailable()) {
+        return;
+    }
+
+    try {
+        const settingsFilePath = getSettingsFilePath();
+        if (!fs.existsSync(settingsFilePath)) {
+            return;
+        }
+
+        const parsed = JSON.parse(fs.readFileSync(settingsFilePath, "utf8"));
+        const needsMigration = SECRET_SETTING_KEYS.some((key) => {
+            const value = parsed && parsed[key];
+            return typeof value === "string" && value && !value.startsWith("enc:");
+        });
+
+        if (!needsMigration) {
+            return;
+        }
+
+        const merged = sanitizeSettings(decryptSettingsFromDisk(parsed));
+        fs.writeFileSync(
+            settingsFilePath,
+            JSON.stringify(encryptSettingsForDisk(merged), null, 2),
+            "utf8"
+        );
+        restrictSettingsFilePermissions();
+    } catch (_error) {
+        // Ignore migration failures; user can re-enter secrets.
+    }
 }
 
 function loadSettingsFromDisk() {
@@ -122,7 +283,7 @@ function loadSettingsFromDisk() {
         const parsed = JSON.parse(fileContent);
         return {
             ...DEFAULT_SETTINGS,
-            ...sanitizeSettings(parsed)
+            ...sanitizeSettings(decryptSettingsFromDisk(parsed))
         };
     } catch (_error) {
         return { ...DEFAULT_SETTINGS };
@@ -137,19 +298,60 @@ function saveSettingsToDisk(partialSettings) {
     });
 
     const settingsFilePath = getSettingsFilePath();
-    fs.writeFileSync(settingsFilePath, JSON.stringify(merged, null, 2), "utf8");
+    fs.writeFileSync(
+        settingsFilePath,
+        JSON.stringify(encryptSettingsForDisk(merged), null, 2),
+        "utf8"
+    );
+    restrictSettingsFilePermissions();
 
     return merged;
 }
 
-function clearSavedCookie() {
+function sleep(ms) {
+    return new Promise((resolve) => {
+        setTimeout(resolve, ms);
+    });
+}
+
+function getRateLimitEnv() {
+    return {
+        MMF_METADATA_DELAY_SEC: String(RATE_LIMITS.metadataDelaySec),
+        MMF_STL_FILE_DELAY_SEC: String(RATE_LIMITS.stlFileDelaySec),
+        MMF_IMAGE_DELAY_SEC: String(RATE_LIMITS.imageDelaySec)
+    };
+}
+
+function clearSavedMmfSession() {
     const current = loadSettingsFromDisk();
-    if (!current.cookie) {
+    const hadSession = Boolean(
+        current.cookie
+        || current.medusaJwt
+        || current.medusaPublishableKey
+        || current.mmfUsername
+    );
+
+    if (!hadSession) {
         return false;
     }
 
-    saveSettingsToDisk({ cookie: "" });
+    saveSettingsToDisk({
+        cookie: "",
+        medusaJwt: "",
+        medusaPublishableKey: "",
+        mmfUsername: "",
+        sessionCapturedAt: ""
+    });
+
+    clearMmfBrowserSession().catch(() => {
+        // Best-effort; settings were already cleared.
+    });
+
     return true;
+}
+
+function clearSavedCookie() {
+    return clearSavedMmfSession();
 }
 
 function looksLikeCookieExpiration(text) {
@@ -164,10 +366,108 @@ function looksLikeCookieExpiration(text) {
         "cookie expired",
         "missing cf_clearance",
         "session logged out",
-        "cloudflare"
+        "cloudflare",
+        "http 401",
+        "http 403",
+        "unauthorized",
+        "invalid token",
+        "authentication required",
+        "please log in",
+        "please login",
+        "access denied"
     ];
 
     return patterns.some((pattern) => normalized.includes(pattern));
+}
+
+async function validateStoredMmfSession() {
+    const saved = loadSettingsFromDisk();
+    const cookie = normalizeCookie(saved.cookie || "");
+    const medusaJwt = normalizeMedusaJwt(saved.medusaJwt || "");
+    const medusaPublishableKey = normalizePublishableKey(saved.medusaPublishableKey || "");
+
+    if (!cookie) {
+        return {
+            ok: true,
+            valid: false,
+            reason: "missing",
+            message: "No MMF session saved."
+        };
+    }
+
+    const cookieProbe = await probeMmfSessionCookies();
+    if (!cookieProbe.valid) {
+        return {
+            ok: true,
+            valid: false,
+            reason: "browser-session-empty",
+            message: "Browser session is empty. Use Sign in and Capture session again.",
+            cookieNames: cookieProbe.cookieNames
+        };
+    }
+
+    if (!medusaJwt || !medusaPublishableKey) {
+        return {
+            ok: true,
+            valid: true,
+            partial: true,
+            reason: "partial",
+            message: "Cookie OK. JWT or publishable key still missing for auto-load.",
+            sessionCapturedAt: saved.sessionCapturedAt || ""
+        };
+    }
+
+    try {
+        const meResponse = await requestJson("https://api-shop-manager.myminifactory.com/store/customers/me", {
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0",
+                Accept: "application/json",
+                Authorization: `Bearer ${medusaJwt}`,
+                "x-publishable-api-key": medusaPublishableKey,
+                Cookie: cookie
+            },
+            timeoutMs: 15000
+        });
+
+        if (meResponse.statusCode === 401 || meResponse.statusCode === 403) {
+            clearSavedMmfSession();
+            return {
+                ok: true,
+                valid: false,
+                expired: true,
+                reason: "api-rejected",
+                message: `MMF session expired (HTTP ${meResponse.statusCode}). Sign in and capture again.`
+            };
+        }
+
+        if (meResponse.statusCode !== 200) {
+            return {
+                ok: true,
+                valid: true,
+                partial: true,
+                reason: "api-unreachable",
+                message: `Could not verify session online (HTTP ${meResponse.statusCode}). Local cookie still present.`,
+                sessionCapturedAt: saved.sessionCapturedAt || ""
+            };
+        }
+
+        return {
+            ok: true,
+            valid: true,
+            reason: "ok",
+            message: "MMF session looks valid.",
+            sessionCapturedAt: saved.sessionCapturedAt || ""
+        };
+    } catch (error) {
+        return {
+            ok: true,
+            valid: true,
+            partial: true,
+            reason: "offline",
+            message: `Offline check only (API error: ${String(error.message || error)}).`,
+            sessionCapturedAt: saved.sessionCapturedAt || ""
+        };
+    }
 }
 
 function runCommand(executable, args, timeoutMs = 20000) {
@@ -764,9 +1064,40 @@ function getRuntimeInfo(rawConfig) {
     };
 }
 
+function getAllowedOpenPathRoots(rawConfig) {
+    const runtime = getRuntimeInfo(rawConfig);
+    const saved = loadSettingsFromDisk();
+    const config = rawConfig && typeof rawConfig === "object" ? rawConfig : {};
+
+    const candidatePaths = [
+        runtime.downloadsPath,
+        runtime.stlFilesPath,
+        cleanInputPath(config.downloadRoot || saved.downloadRoot),
+        cleanInputPath(config.basePath || saved.basePath),
+        cleanInputPath(config.jsonPath || saved.jsonPath),
+        cleanInputPath(config.foldersPath || saved.foldersPath)
+    ].filter(Boolean);
+
+    return [...new Set(candidatePaths.map((entry) => path.resolve(entry)))];
+}
+
+function isPathWithinAllowedRoots(targetPath, rawConfig) {
+    const resolvedTarget = path.resolve(targetPath);
+    const allowedRoots = getAllowedOpenPathRoots(rawConfig);
+
+    return allowedRoots.some((rootPath) => {
+        if (resolvedTarget === rootPath) {
+            return true;
+        }
+
+        return resolvedTarget.startsWith(`${rootPath}${path.sep}`);
+    });
+}
+
 async function openPathInShell(payload) {
     const options = payload && typeof payload === "object" ? payload : {};
     const targetPath = cleanInputPath(typeof options.path === "string" ? options.path : "");
+    const rawConfig = options.config && typeof options.config === "object" ? options.config : {};
 
     if (!targetPath) {
         return {
@@ -782,7 +1113,15 @@ async function openPathInShell(payload) {
         };
     }
 
-    const openResult = await shell.openPath(targetPath);
+    const resolvedTarget = path.resolve(targetPath);
+    if (!isPathWithinAllowedRoots(resolvedTarget, rawConfig)) {
+        return {
+            ok: false,
+            message: "Path is outside the allowed download workspace."
+        };
+    }
+
+    const openResult = await shell.openPath(resolvedTarget);
     if (openResult) {
         return {
             ok: false,
@@ -792,7 +1131,7 @@ async function openPathInShell(payload) {
 
     return {
         ok: true,
-        path: targetPath
+        path: resolvedTarget
     };
 }
 
@@ -1044,124 +1383,49 @@ async function resolveOwnModelIds(rawConfig) {
     if (!cookie) {
         return {
             ok: false,
-            message: "Cookie is required. Paste PHPSESSID and cf_clearance first."
+            message: "Cookie is required. Sign in to MMF or paste PHPSESSID and cf_clearance first."
         };
     }
 
     if (!medusaJwt) {
         return {
             ok: false,
-            message: "Medusa JWT is required. Paste medusa_auth_token first."
+            message: "Medusa JWT is required. Sign in to MMF or paste medusa_auth_token first."
         };
     }
 
     if (!medusaPublishableKey) {
         return {
             ok: false,
-            message: "x-publishable-api-key is required. Paste the pk_ key first."
+            message: "x-publishable-api-key is required. Open your MMF profile once after sign-in, or paste the pk_ key."
         };
     }
 
-    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0";
-
-    let meResponse;
     try {
-        meResponse = await requestJson("https://api-shop-manager.myminifactory.com/store/customers/me", {
-            headers: {
-                "User-Agent": userAgent,
-                Accept: "application/json",
-                Authorization: `Bearer ${medusaJwt}`,
-                "x-publishable-api-key": medusaPublishableKey,
-                Cookie: cookie
-            }
+        const result = await resolveOwnCatalog({
+            requestJson,
+            sleep,
+            cookie,
+            medusaJwt,
+            medusaPublishableKey,
+            rateLimits: RATE_LIMITS,
+            onProgress: (payload) => emitRendererEvent("catalog:progress", payload)
         });
-    } catch (error) {
-        return {
-            ok: false,
-            message: `Failed to call /store/customers/me: ${String(error.message || error)}`
-        };
-    }
 
-    if (meResponse.statusCode !== 200 || !meResponse.json || typeof meResponse.json !== "object") {
-        const preview = compactPreview(meResponse.text);
-        return {
-            ok: false,
-            message: `/store/customers/me returned HTTP ${meResponse.statusCode}.${preview ? ` Body: ${preview}` : ""}`
-        };
-    }
-
-    const mmfId = String(
-        meResponse.json
-            && meResponse.json.customer
-            && meResponse.json.customer.metadata
-            && meResponse.json.customer.metadata.mmf_id
-            ? meResponse.json.customer.metadata.mmf_id
-            : ""
-    ).trim();
-
-    if (!mmfId) {
-        return {
-            ok: false,
-            message: "Could not read customer.metadata.mmf_id from /store/customers/me response."
-        };
-    }
-
-    let previewResponse;
-    try {
-        previewResponse = await requestJson("https://www.myminifactory.com/api/data-library/objectPreviews", {
-            headers: {
-                "User-Agent": userAgent,
-                Accept: "application/json",
-                Cookie: cookie
-            }
-        });
-    } catch (error) {
-        return {
-            ok: false,
-            message: `Failed to call objectPreviews: ${String(error.message || error)}`
-        };
-    }
-
-    if (previewResponse.statusCode !== 200 || !Array.isArray(previewResponse.json)) {
-        const preview = compactPreview(previewResponse.text);
-        return {
-            ok: false,
-            message: `objectPreviews returned HTTP ${previewResponse.statusCode}.${preview ? ` Body: ${preview}` : ""}`
-        };
-    }
-
-    const allObjects = previewResponse.json;
-    const ownObjects = allObjects.filter((item) => {
-        const creatorId = item && item.creatorId !== undefined && item.creatorId !== null
-            ? String(item.creatorId).trim()
-            : "";
-
-        return creatorId === mmfId;
-    });
-
-    const seenIds = new Set();
-    const ids = [];
-
-    ownObjects.forEach((item) => {
-        const originalId = item && item.originalId !== undefined && item.originalId !== null
-            ? String(item.originalId).trim()
-            : "";
-
-        if (!/^\d+$/.test(originalId) || seenIds.has(originalId)) {
-            return;
+        if (!result.ok) {
+            return {
+                ok: false,
+                message: result.message || "Failed to resolve owned model IDs."
+            };
         }
 
-        seenIds.add(originalId);
-        ids.push(originalId);
-    });
-
-    return {
-        ok: true,
-        mmfId,
-        totalCount: allObjects.length,
-        ownedCount: ownObjects.length,
-        ids
-    };
+        return result;
+    } catch (error) {
+        return {
+            ok: false,
+            message: `Failed to resolve owned model IDs: ${String(error.message || error)}`
+        };
+    }
 }
 
 function emitRendererEvent(channel, payload) {
@@ -1264,11 +1528,11 @@ function startProcessRun(plan) {
             && looksLikeCookieExpiration(runRecord.outputTail)
         ) {
             runRecord.cookieExpiredNotified = true;
-            clearSavedCookie();
+            clearSavedMmfSession();
             emitWorkflowState({
                 type: "cookie-expired",
                 runId,
-                message: "Stored cookie was cleared after an expiration/authentication error. Please paste a fresh cookie."
+                message: "MMF session expired during the run. Sign in and capture a fresh session."
             });
         }
     };
@@ -1400,7 +1664,8 @@ function buildStepPlan(stepKey, rawConfig) {
                 ...(medusaPublishableKey ? { MMF_PUBLISHABLE_KEY: medusaPublishableKey } : {}),
                 MMF_DOWNLOAD_ROOT: downloadsPath,
                 MMF_MODEL_IDS_PATH: path.join(scriptRoot, "model_ids.txt"),
-                PATH: processPathWithResolvedJq
+                PATH: processPathWithResolvedJq,
+                ...getRateLimitEnv()
             },
             warnings
         };
@@ -1462,7 +1727,8 @@ function buildStepPlan(stepKey, rawConfig) {
                 MMF_COOKIE: cookie,
                 ...(medusaJwt ? { MMF_MEDUSA_JWT: medusaJwt } : {}),
                 ...(medusaPublishableKey ? { MMF_PUBLISHABLE_KEY: medusaPublishableKey } : {}),
-                PATH: processPathWithResolvedJq
+                PATH: processPathWithResolvedJq,
+                ...getRateLimitEnv()
             },
             warnings
         };
@@ -1674,13 +1940,13 @@ function createMainWindow() {
         minWidth: 1080,
         minHeight: 760,
         show: false,
-        title: "MyMiniFactory Bulk Downloader",
+        title: "Bulk Downloader",
         icon: getIconPath(),
         webPreferences: {
             preload: path.join(__dirname, "preload.js"),
             contextIsolation: true,
             nodeIntegration: false,
-            sandbox: false
+            sandbox: true
         }
     });
 
@@ -1735,6 +2001,59 @@ ipcMain.handle("desktop:resolve-own-model-ids", async (_event, payload) => {
     return resolveOwnModelIds(payload);
 });
 
+ipcMain.handle("desktop:open-mmf-login", async () => {
+    try {
+        const saved = loadSettingsFromDisk();
+        const hasSavedSession = Boolean(
+            saved.cookie || saved.medusaJwt || saved.medusaPublishableKey
+        );
+
+        return await openMmfLoginWindow(saved.mmfUsername || "", {
+            forceLogin: !hasSavedSession
+        });
+    } catch (error) {
+        return {
+            ok: false,
+            message: `Failed to open MyMiniFactory window: ${String(error.message || error)}`
+        };
+    }
+});
+
+ipcMain.handle("desktop:clear-mmf-browser-session", async () => {
+    try {
+        return await clearMmfBrowserSession();
+    } catch (error) {
+        return {
+            ok: false,
+            message: String(error.message || error)
+        };
+    }
+});
+
+ipcMain.handle("desktop:capture-mmf-session", async () => {
+    const captured = await captureMmfSession();
+    if (captured && captured.ok) {
+        saveSettingsToDisk({
+            cookie: captured.cookie,
+            medusaJwt: captured.medusaJwt || "",
+            medusaPublishableKey: captured.medusaPublishableKey || "",
+            mmfUsername: captured.mmfUsername || "",
+            sessionCapturedAt: captured.capturedAt || new Date().toISOString()
+        });
+    }
+
+    return captured;
+});
+
+ipcMain.handle("desktop:validate-mmf-session", async () => {
+    return validateStoredMmfSession();
+});
+
+ipcMain.handle("desktop:close-mmf-login", async () => {
+    closeMmfLoginWindow();
+    return { ok: true };
+});
+
 ipcMain.handle("desktop:start-workflow-step", async (_event, payload) => {
     const stepKey = payload && typeof payload.stepKey === "string" ? payload.stepKey : "";
     const plan = buildStepPlan(stepKey, payload ? payload.config : null);
@@ -1753,6 +2072,7 @@ ipcMain.handle("desktop:stop-workflow-step", async () => {
 });
 
 app.whenReady().then(() => {
+    migratePlaintextSecretsIfNeeded();
     createMainWindow();
 
     app.on("activate", () => {

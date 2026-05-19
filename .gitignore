@@ -4,3 +4,8 @@ out/
 release/
 *.log
 *.tmp
+.cursor/
+
+# Local workflow data (never commit real IDs or sessions)
+model_ids.txt
+desktop-settings.json

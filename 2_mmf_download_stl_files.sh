@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# MyMiniFactory Bulk STL/ZIP File Downloader
+# Bulk Downloader — STL/ZIP files (Step 2)
 # Downloads actual 3D printable files from a list of model IDs
 # This is STEP 2 - run AFTER the metadata downloader creates JSON files
 # 
@@ -112,8 +112,8 @@ for json_file in ../model_*.json; do
                 rm -f "$output_file"
             fi
             
-            # Rate limiting: sleep for 2 seconds between downloads
-            sleep 2
+            # Rate limiting: sleep between downloads
+            sleep "${MMF_STL_FILE_DELAY_SEC:-5}"
         fi
     done <<< "$download_data"
     

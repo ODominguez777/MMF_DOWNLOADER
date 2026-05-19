@@ -11,17 +11,24 @@ const elements = {
     cfClearanceInput: document.getElementById("cfClearanceInput"),
     jwtInput: document.getElementById("jwtInput"),
     publishableKeyInput: document.getElementById("publishableKeyInput"),
-    idsChipEditor: document.getElementById("idsChipEditor"),
-    idsChipList: document.getElementById("idsChipList"),
-    idsChipInput: document.getElementById("idsChipInput"),
+    modelIdList: document.getElementById("modelIdList"),
+    modelListPagination: document.getElementById("modelListPagination"),
+    modelListPrevBtn: document.getElementById("modelListPrevBtn"),
+    modelListNextBtn: document.getElementById("modelListNextBtn"),
+    modelListPageInfo: document.getElementById("modelListPageInfo"),
+    modelListTotalInfo: document.getElementById("modelListTotalInfo"),
+    openMmfLoginBtn: document.getElementById("openMmfLoginBtn"),
+    captureMmfSessionBtn: document.getElementById("captureMmfSessionBtn"),
+    checkSessionBtn: document.getElementById("checkSessionBtn"),
+    sessionStatus: document.getElementById("sessionStatus"),
     idsInput: document.getElementById("idsInput"),
     downloadRootInput: document.getElementById("downloadRootInput"),
     browseDownloadRootBtn: document.getElementById("browseDownloadRootBtn"),
     openDownloadRootBtn: document.getElementById("openDownloadRootBtn"),
     testModeCheck: document.getElementById("testModeCheck"),
-    loadSampleBtn: document.getElementById("loadSampleBtn"),
     autoLoadMyIdsBtn: document.getElementById("autoLoadMyIdsBtn"),
-    clearBtn: document.getElementById("clearBtn"),
+    clearCatalogBtn: document.getElementById("clearCatalogBtn"),
+    clearSessionBtn: document.getElementById("clearSessionBtn"),
     validateBtn: document.getElementById("validateBtn"),
     downloadIdsBtn: document.getElementById("downloadIdsBtn"),
     copyCommandsBtn: document.getElementById("copyCommandsBtn"),
@@ -75,7 +82,6 @@ const elements = {
     jsonViewer: document.getElementById("jsonViewer")
 };
 
-const SAMPLE_IDS = ["409352", "409348", "496377"];
 const mmfDesktopApi = window.desktopApi || null;
 
 let lastDependencySummary = null;
@@ -87,6 +93,59 @@ let settingsApplyInProgress = false;
 let pipelineRunning = false;
 let runtimeInfoCache = null;
 let modelIdEntries = [];
+const MODEL_LIST_UI_PAGE_SIZE = 25;
+let modelListUiPage = 1;
+
+function normalizeModelEntry(entry) {
+    if (typeof entry === "string") {
+        const id = entry.trim();
+        return id ? { id, name: "" } : null;
+    }
+
+    if (!entry || typeof entry !== "object") {
+        return null;
+    }
+
+    const id = String(entry.id || "").trim();
+    if (!id) {
+        return null;
+    }
+
+    return {
+        id,
+        name: typeof entry.name === "string" ? entry.name.trim() : ""
+    };
+}
+
+function mergeModelEntries(existingEntries, incomingEntries) {
+    const merged = new Map();
+
+    existingEntries.forEach((entry) => {
+        const normalized = normalizeModelEntry(entry);
+        if (normalized) {
+            merged.set(normalized.id, normalized);
+        }
+    });
+
+    incomingEntries.forEach((entry) => {
+        const normalized = normalizeModelEntry(entry);
+        if (!normalized) {
+            return;
+        }
+
+        const current = merged.get(normalized.id);
+        if (!current) {
+            merged.set(normalized.id, normalized);
+            return;
+        }
+
+        if (!current.name && normalized.name) {
+            current.name = normalized.name;
+        }
+    });
+
+    return [...merged.values()];
+}
 
 const pendingRunResolvers = new Map();
 
@@ -136,170 +195,291 @@ function syncIdsTextareaFromEntries() {
         return;
     }
 
-    elements.idsInput.value = modelIdEntries.join("\n");
+    elements.idsInput.value = modelIdEntries.map((entry) => entry.id).join("\n");
 }
 
-function renderModelIdChips() {
-    if (!elements.idsChipList) {
+function getModelIdCatalogSnapshot() {
+    return modelIdEntries
+        .filter((entry) => entry && /^\d+$/.test(entry.id))
+        .map((entry) => ({
+            id: entry.id,
+            name: entry.name || ""
+        }));
+}
+
+function getModelListPageCount() {
+    if (modelIdEntries.length === 0) {
+        return 1;
+    }
+
+    return Math.ceil(modelIdEntries.length / MODEL_LIST_UI_PAGE_SIZE);
+}
+
+function clampModelListUiPage() {
+    const pageCount = getModelListPageCount();
+    if (modelListUiPage < 1) {
+        modelListUiPage = 1;
+    }
+    if (modelListUiPage > pageCount) {
+        modelListUiPage = pageCount;
+    }
+}
+
+function updateModelListPaginationUi() {
+    if (!elements.modelListPagination) {
         return;
     }
 
-    elements.idsChipList.innerHTML = "";
+    const total = modelIdEntries.length;
+    const pageCount = getModelListPageCount();
+    const showPagination = total > MODEL_LIST_UI_PAGE_SIZE;
 
-    const countByValue = new Map();
+    elements.modelListPagination.classList.toggle("hidden", !showPagination);
+
+    if (elements.modelListPageInfo) {
+        elements.modelListPageInfo.textContent = `Page ${modelListUiPage} of ${pageCount}`;
+    }
+
+    if (elements.modelListTotalInfo) {
+        const start = total === 0 ? 0 : (modelListUiPage - 1) * MODEL_LIST_UI_PAGE_SIZE + 1;
+        const end = Math.min(modelListUiPage * MODEL_LIST_UI_PAGE_SIZE, total);
+        elements.modelListTotalInfo.textContent = total === 0
+            ? ""
+            : `Showing ${start}–${end} of ${total}`;
+    }
+
+    if (elements.modelListPrevBtn) {
+        elements.modelListPrevBtn.disabled = !showPagination || modelListUiPage <= 1;
+    }
+
+    if (elements.modelListNextBtn) {
+        elements.modelListNextBtn.disabled = !showPagination || modelListUiPage >= pageCount;
+    }
+}
+
+function renderModelIdList() {
+    if (!elements.modelIdList) {
+        return;
+    }
+
+    elements.modelIdList.innerHTML = "";
+    clampModelListUiPage();
+
+    const countById = new Map();
     modelIdEntries.forEach((entry) => {
-        countByValue.set(entry, (countByValue.get(entry) || 0) + 1);
+        countById.set(entry.id, (countById.get(entry.id) || 0) + 1);
     });
 
-    modelIdEntries.forEach((entry, index) => {
-        const chip = document.createElement("span");
-        chip.classList.add("id-chip");
+    if (modelIdEntries.length === 0) {
+        const emptyItem = document.createElement("li");
+        emptyItem.className = "model-id-row model-id-row-empty";
+        emptyItem.textContent = "No models loaded yet. Capture session, then click Auto load my IDs.";
+        elements.modelIdList.appendChild(emptyItem);
+        updateModelListPaginationUi();
+        return;
+    }
 
-        const isNumeric = /^\d+$/.test(entry);
-        const isDuplicate = (countByValue.get(entry) || 0) > 1;
+    const pageStart = (modelListUiPage - 1) * MODEL_LIST_UI_PAGE_SIZE;
+    const pageEntries = modelIdEntries.slice(pageStart, pageStart + MODEL_LIST_UI_PAGE_SIZE);
+
+    pageEntries.forEach((entry, offset) => {
+        const index = pageStart + offset;
+        const row = document.createElement("li");
+        row.classList.add("model-id-row");
+
+        const isNumeric = /^\d+$/.test(entry.id);
+        const isDuplicate = (countById.get(entry.id) || 0) > 1;
 
         if (!isNumeric) {
-            chip.classList.add("id-chip-invalid");
+            row.classList.add("model-id-row-invalid");
         } else if (isDuplicate) {
-            chip.classList.add("id-chip-duplicate");
+            row.classList.add("model-id-row-duplicate");
         }
 
-        const valueSpan = document.createElement("span");
-        valueSpan.textContent = entry;
+        const idCell = document.createElement("span");
+        idCell.className = "model-id-row-id";
+        idCell.textContent = entry.id;
+
+        const nameCell = document.createElement("span");
+        nameCell.className = "model-id-row-name";
+        nameCell.textContent = entry.name || "—";
 
         const removeBtn = document.createElement("button");
         removeBtn.type = "button";
-        removeBtn.className = "id-chip-remove";
-        removeBtn.textContent = "x";
-        removeBtn.dataset.chipIndex = String(index);
-        removeBtn.setAttribute("aria-label", `Remove model ID ${entry}`);
+        removeBtn.className = "model-id-row-remove";
+        removeBtn.textContent = "Remove";
+        removeBtn.dataset.rowIndex = String(index);
+        removeBtn.setAttribute("aria-label", `Remove model ${entry.name || entry.id}`);
 
-        chip.appendChild(valueSpan);
-        chip.appendChild(removeBtn);
-        elements.idsChipList.appendChild(chip);
+        row.appendChild(idCell);
+        row.appendChild(nameCell);
+        row.appendChild(removeBtn);
+        elements.modelIdList.appendChild(row);
     });
+
+    updateModelListPaginationUi();
 }
 
-function setModelIdEntriesFromText(inputText) {
-    modelIdEntries = parseModelIdTokens(inputText);
-    syncIdsTextareaFromEntries();
-    renderModelIdChips();
-}
-
-function addModelIdEntriesFromText(inputText) {
+function setModelIdEntriesFromText(inputText, catalog = []) {
     const tokens = parseModelIdTokens(inputText);
-    if (tokens.length === 0) {
-        return false;
-    }
+    const catalogMap = new Map();
 
-    modelIdEntries.push(...tokens);
+    (Array.isArray(catalog) ? catalog : []).forEach((entry) => {
+        const normalized = normalizeModelEntry(entry);
+        if (normalized) {
+            catalogMap.set(normalized.id, normalized.name);
+        }
+    });
+
+    modelIdEntries = tokens.map((id) => ({
+        id,
+        name: catalogMap.get(id) || ""
+    }));
+
+    modelListUiPage = 1;
     syncIdsTextareaFromEntries();
-    renderModelIdChips();
-    return true;
+    renderModelIdList();
 }
 
-function setupModelIdChipEditor() {
-    if (!elements.idsChipInput || !elements.idsChipList || !elements.idsInput) {
+function setModelIdEntriesFromCatalog(items) {
+    const normalizedItems = (Array.isArray(items) ? items : [])
+        .map((entry) => normalizeModelEntry(entry))
+        .filter(Boolean);
+
+    modelIdEntries = mergeModelEntries([], normalizedItems);
+    modelListUiPage = 1;
+    syncIdsTextareaFromEntries();
+    renderModelIdList();
+}
+
+function setupModelIdList() {
+    if (!elements.modelIdList || !elements.idsInput) {
         return;
     }
 
-    const commitChipInput = () => {
-        const raw = elements.idsChipInput.value;
-        if (!raw || !raw.trim()) {
-            return false;
-        }
-
-        const added = addModelIdEntriesFromText(raw);
-        elements.idsChipInput.value = "";
-        return added;
-    };
-
-    elements.idsChipInput.addEventListener("keydown", (event) => {
-        const shouldCommit = event.key === "Enter"
-            || event.key === ","
-            || event.key === ";"
-            || (event.key === " " && elements.idsChipInput.value.trim().length > 0);
-
-        if (shouldCommit) {
-            event.preventDefault();
-            if (commitChipInput()) {
-                refreshDashboard();
-                scheduleSettingsSave();
+    if (elements.modelListPrevBtn) {
+        elements.modelListPrevBtn.addEventListener("click", () => {
+            if (modelListUiPage > 1) {
+                modelListUiPage -= 1;
+                renderModelIdList();
             }
-            return;
-        }
+        });
+    }
 
-        if (event.key === "Backspace" && !elements.idsChipInput.value && modelIdEntries.length > 0) {
-            event.preventDefault();
-            modelIdEntries.pop();
-            syncIdsTextareaFromEntries();
-            renderModelIdChips();
-            refreshDashboard();
-            scheduleSettingsSave();
-        }
-    });
+    if (elements.modelListNextBtn) {
+        elements.modelListNextBtn.addEventListener("click", () => {
+            if (modelListUiPage < getModelListPageCount()) {
+                modelListUiPage += 1;
+                renderModelIdList();
+            }
+        });
+    }
 
-    elements.idsChipInput.addEventListener("input", () => {
-        if (!/[\n\r,;\t]/.test(elements.idsChipInput.value)) {
-            return;
-        }
-
-        if (commitChipInput()) {
-            refreshDashboard();
-            scheduleSettingsSave();
-        }
-    });
-
-    elements.idsChipInput.addEventListener("paste", (event) => {
-        const pastedText = event.clipboardData ? event.clipboardData.getData("text") : "";
-        if (!pastedText || !/[\s,;]+/.test(pastedText)) {
-            return;
-        }
-
-        event.preventDefault();
-        if (addModelIdEntriesFromText(pastedText)) {
-            elements.idsChipInput.value = "";
-            refreshDashboard();
-            scheduleSettingsSave();
-        }
-    });
-
-    elements.idsChipInput.addEventListener("blur", () => {
-        if (commitChipInput()) {
-            refreshDashboard();
-            scheduleSettingsSave();
-        }
-    });
-
-    elements.idsChipList.addEventListener("click", (event) => {
+    elements.modelIdList.addEventListener("click", (event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) {
             return;
         }
 
-        const removeBtn = target.closest("button[data-chip-index]");
+        const removeBtn = target.closest(".model-id-row-remove");
         if (!removeBtn) {
             return;
         }
 
-        const index = Number.parseInt(removeBtn.dataset.chipIndex || "", 10);
+        const index = Number.parseInt(removeBtn.dataset.rowIndex || "", 10);
         if (Number.isNaN(index) || index < 0 || index >= modelIdEntries.length) {
             return;
         }
 
         modelIdEntries.splice(index, 1);
+        clampModelListUiPage();
         syncIdsTextareaFromEntries();
-        renderModelIdChips();
+        renderModelIdList();
         refreshDashboard();
         scheduleSettingsSave();
-        elements.idsChipInput.focus();
     });
+}
 
-    if (elements.idsChipEditor) {
-        elements.idsChipEditor.addEventListener("click", () => {
-            elements.idsChipInput.focus();
-        });
+function updateSessionStatusBadge(result) {
+    if (!elements.sessionStatus) {
+        return;
     }
+
+    elements.sessionStatus.classList.remove(
+        "session-status-ok",
+        "session-status-warn",
+        "session-status-bad",
+        "session-status-unknown"
+    );
+
+    if (!result) {
+        elements.sessionStatus.classList.add("session-status-unknown");
+        elements.sessionStatus.textContent = "Session: not checked";
+        return;
+    }
+
+    if (result.valid && !result.partial) {
+        elements.sessionStatus.classList.add("session-status-ok");
+        const captured = result.sessionCapturedAt
+            ? ` (saved ${new Date(result.sessionCapturedAt).toLocaleString()})`
+            : "";
+        elements.sessionStatus.textContent = `Session: valid${captured}`;
+        return;
+    }
+
+    if (result.valid && result.partial) {
+        elements.sessionStatus.classList.add("session-status-warn");
+        elements.sessionStatus.textContent = `Session: partial — ${result.message || "needs JWT or publishable key"}`;
+        return;
+    }
+
+    elements.sessionStatus.classList.add("session-status-bad");
+    elements.sessionStatus.textContent = `Session: invalid — ${result.message || "sign in again"}`;
+}
+
+async function checkMmfSessionFromUi(silent = false) {
+    if (!mmfDesktopApi || !mmfDesktopApi.validateMmfSession) {
+        if (!silent) {
+            setStatus("Session check is available only in desktop mode.", "warn");
+        }
+        return null;
+    }
+
+    try {
+        const result = await mmfDesktopApi.validateMmfSession();
+        updateSessionStatusBadge(result);
+
+        if (!silent) {
+            if (result && result.valid) {
+                setStatus(result.message || "Session looks valid.", result.partial ? "warn" : "ok");
+            } else if (result && result.expired) {
+                clearSessionFieldsInForm();
+                setStatus(result.message || "Session expired. Sign in and capture again.", "bad");
+                refreshDashboard();
+                scheduleSettingsSave();
+            } else {
+                setStatus(result && result.message ? result.message : "Session is not ready.", "warn");
+            }
+        } else if (result && result.expired) {
+            clearSessionFieldsInForm();
+            refreshDashboard();
+            scheduleSettingsSave();
+        }
+
+        return result;
+    } catch (err) {
+        if (!silent) {
+            setStatus(`Session check failed: ${String(err?.message || err)}`, "bad");
+        }
+        return null;
+    }
+}
+
+function clearSessionFieldsInForm() {
+    elements.phpSessidInput.value = "";
+    elements.cfClearanceInput.value = "";
+    elements.jwtInput.value = "";
+    elements.publishableKeyInput.value = "";
 }
 
 function normalizeCookieFieldValue(value, cookieName) {
@@ -588,6 +768,7 @@ function getSettingsSnapshot() {
         medusaJwt: normalizeJwtValue(elements.jwtInput.value),
         medusaPublishableKey: normalizePublishableKeyValue(elements.publishableKeyInput.value),
         modelIdsText: elements.idsInput.value,
+        modelIdCatalog: getModelIdCatalogSnapshot(),
         downloadRoot: elements.downloadRootInput.value,
         testModeCheck: elements.testModeCheck.checked,
         basePath: elements.basePathInput.value,
@@ -620,7 +801,8 @@ function applySettingsToForm(settings) {
     const modelIdsText = typeof settings.modelIdsText === "string"
         ? settings.modelIdsText
         : elements.idsInput.value;
-    setModelIdEntriesFromText(modelIdsText);
+    const catalog = Array.isArray(settings.modelIdCatalog) ? settings.modelIdCatalog : [];
+    setModelIdEntriesFromText(modelIdsText, catalog);
     elements.downloadRootInput.value = typeof settings.downloadRoot === "string" ? settings.downloadRoot : elements.downloadRootInput.value;
     elements.testModeCheck.checked = typeof settings.testModeCheck === "boolean"
         ? settings.testModeCheck
@@ -771,6 +953,118 @@ async function copyText(text) {
     helper.remove();
 }
 
+function applyCapturedSessionToForm(session) {
+    if (!session || !session.ok) {
+        return;
+    }
+
+    if (typeof session.cookie === "string" && session.cookie.trim()) {
+        const parts = parseLegacyCookie(session.cookie);
+        elements.phpSessidInput.value = parts.phpSessid;
+        elements.cfClearanceInput.value = parts.cfClearance;
+    }
+
+    if (typeof session.medusaJwt === "string" && session.medusaJwt.trim()) {
+        elements.jwtInput.value = normalizeJwtValue(session.medusaJwt);
+    }
+
+    if (typeof session.medusaPublishableKey === "string" && session.medusaPublishableKey.trim()) {
+        elements.publishableKeyInput.value = normalizePublishableKeyValue(session.medusaPublishableKey);
+    }
+}
+
+async function openMmfLoginFromUi() {
+    if (!mmfDesktopApi || !mmfDesktopApi.openMmfLogin) {
+        setStatus("MMF browser is available only in desktop mode.", "warn");
+        return;
+    }
+
+    try {
+        const result = await mmfDesktopApi.openMmfLogin();
+        if (result && result.ok === false) {
+            setStatus(result.message || "Failed to open MyMiniFactory window.", "bad");
+            return;
+        }
+
+        if (result && result.mode === "profile") {
+            setStatus("Opened your MMF profile. Click Capture session to sync credentials.", "ok");
+            return;
+        }
+
+        if (result && result.mode === "home") {
+            setStatus("Opened MMF (signed in). Open your profile, then click Capture session.", "neutral");
+            return;
+        }
+
+        setStatus("MMF sign-in window opened. Log in, then click Capture session.", "neutral");
+    } catch (err) {
+        setStatus(`Failed to open MMF: ${String(err?.message || err)}`, "bad");
+    }
+}
+
+async function captureMmfSessionFromUi() {
+    if (!mmfDesktopApi || !mmfDesktopApi.captureMmfSession) {
+        setStatus("Session capture is available only in desktop mode.", "warn");
+        return;
+    }
+
+    const button = elements.captureMmfSessionBtn;
+    const previousLabel = button ? button.textContent : "";
+
+    if (button) {
+        button.disabled = true;
+        button.textContent = "Capturing...";
+    }
+
+    try {
+        const session = await mmfDesktopApi.captureMmfSession();
+        if (!session || !session.ok) {
+            const cookieHint = Array.isArray(session?.cookieNames) && session.cookieNames.length > 0
+                ? ` Cookies seen: ${session.cookieNames.join(", ")}.`
+                : "";
+            setStatus(
+                `${session && session.message ? session.message : "Failed to capture MMF session."}${cookieHint}`,
+                session && session.openedLoginWindow ? "warn" : "bad"
+            );
+            return;
+        }
+
+        applyCapturedSessionToForm(session);
+        refreshDashboard();
+        scheduleSettingsSave();
+        await checkMmfSessionFromUi(true);
+
+        const missing = [];
+        if (!session.hasMedusaJwt) {
+            missing.push("medusa_auth_token");
+        }
+        if (!session.hasPublishableKey) {
+            missing.push("x-publishable-api-key");
+        }
+
+        if (missing.length > 0) {
+            setStatus(
+                `Session captured (cookie OK). Still missing: ${missing.join(", ")}. Open your MMF profile in the sign-in window, then capture again.`,
+                "warn"
+            );
+            return;
+        }
+
+        setStatus("MMF session captured and applied.", "ok");
+
+        if (modelIdEntries.length === 0) {
+            await autoLoadOwnModelIds();
+        }
+    } catch (err) {
+        setStatus(`Session capture failed: ${String(err?.message || err)}`, "bad");
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = previousLabel || "Capture session";
+        }
+    }
+}
+
 async function autoLoadOwnModelIds() {
     if (!mmfDesktopApi || !mmfDesktopApi.resolveOwnModelIds) {
         setStatus("Auto-load is available only in desktop mode.", "warn");
@@ -795,6 +1089,15 @@ async function autoLoadOwnModelIds() {
 
     setStatus("Resolving your mmf_id and loading your own catalog IDs...", "neutral");
 
+    let unsubscribeCatalogProgress = null;
+    if (mmfDesktopApi.onCatalogProgress) {
+        unsubscribeCatalogProgress = mmfDesktopApi.onCatalogProgress((payload) => {
+            if (payload && payload.message) {
+                setStatus(payload.message, "neutral");
+            }
+        });
+    }
+
     try {
         const response = await mmfDesktopApi.resolveOwnModelIds({
             cookie: buildCookieFromInputs(),
@@ -807,31 +1110,46 @@ async function autoLoadOwnModelIds() {
             return;
         }
 
-        const normalizedIds = Array.isArray(response.ids)
-            ? response.ids
-                .map((id) => String(id || "").trim())
-                .filter((id) => /^\d+$/.test(id))
+        const catalogItems = Array.isArray(response.items)
+            ? response.items
+                .map((entry) => normalizeModelEntry(entry))
+                .filter(Boolean)
             : [];
 
-        if (normalizedIds.length === 0) {
+        if (catalogItems.length === 0) {
+            const sources = Array.isArray(response.sourcesUsed)
+                ? response.sourcesUsed.join(", ")
+                : "catalog APIs";
             setStatus(
-                `No creator-owned IDs found for mmf_id ${response.mmfId || "unknown"} in objectPreviews.`,
+                `No owned object IDs found for mmf_id ${response.mmfId || "unknown"} (${sources}).`,
                 "warn"
             );
             return;
         }
 
-        setModelIdEntriesFromText(`${normalizedIds.join("\n")}\n`);
+        setModelIdEntriesFromCatalog(catalogItems);
         refreshDashboard();
         scheduleSettingsSave();
 
+        const namedCount = catalogItems.filter((entry) => entry.name).length;
+        const sourceLabel = Array.isArray(response.sourcesUsed) && response.sourcesUsed.length > 0
+            ? response.sourcesUsed.join(" + ")
+            : "catalog";
+        const warningSuffix = Array.isArray(response.warnings) && response.warnings.length > 0
+            ? ` Note: ${response.warnings[0]}`
+            : "";
+
         setStatus(
-            `Loaded ${normalizedIds.length} IDs from your own catalog (mmf_id ${response.mmfId}).`,
+            `Loaded ${catalogItems.length} IDs via ${sourceLabel} (${namedCount} with names, mmf_id ${response.mmfId}).${warningSuffix}`,
             "ok"
         );
     } catch (err) {
         setStatus(`Auto-load failed: ${String(err?.message || err)}`, "bad");
     } finally {
+        if (typeof unsubscribeCatalogProgress === "function") {
+            unsubscribeCatalogProgress();
+        }
+
         if (button) {
             button.disabled = false;
             button.textContent = previousLabel || "Auto load my IDs";
@@ -935,7 +1253,10 @@ async function openPathFromUi(pathValue, label) {
     }
 
     try {
-        const result = await mmfDesktopApi.openPath({ path: targetPath });
+        const result = await mmfDesktopApi.openPath({
+            path: targetPath,
+            config: getSettingsSnapshot()
+        });
         if (result && result.ok) {
             setStatus(`${label} opened.`, "ok");
             return;
@@ -1342,6 +1663,21 @@ async function startWorkflowStep(stepKey, label, options = {}) {
         };
     }
 
+    const needsLiveSession = stepKey === "step1" || stepKey === "step2-test" || stepKey === "step2-full";
+    if (needsLiveSession) {
+        const sessionCheck = await checkMmfSessionFromUi(true);
+        if (sessionCheck && sessionCheck.expired) {
+            const message = sessionCheck.message || "MMF session expired. Capture a fresh session.";
+            if (!silent) {
+                setRunStatus(message, "bad");
+            }
+            return {
+                accepted: false,
+                message
+            };
+        }
+    }
+
     await saveSettingsNow();
 
     if (!silent) {
@@ -1436,6 +1772,17 @@ async function executePipeline() {
     appendRunLog("[pipeline] Starting automatic execution.");
     setRunStatus("Pipeline started.", "ok");
 
+    const preSession = await checkMmfSessionFromUi(true);
+    if (preSession && preSession.expired) {
+        appendRunLog("[pipeline] Session expired before start. Capture a fresh session.", "stderr");
+        setRunStatus("Pipeline blocked: MMF session expired.", "bad");
+        pipelineRunning = false;
+        setRunButtonsState();
+        return;
+    }
+
+    appendRunLog("[pipeline] Existing files are skipped automatically (resume-safe).");
+
     try {
         for (const step of pipelineSteps) {
             const startResult = await startWorkflowStep(step.key, step.label, { silent: true });
@@ -1459,6 +1806,19 @@ async function executePipeline() {
 
             if (outcome.type === "completed" && outcome.success) {
                 appendRunLog(`[pipeline] ${step.label} completed successfully.`);
+
+                if (step.key === "step1" || step.key === "step2-test") {
+                    const midSession = await checkMmfSessionFromUi(true);
+                    if (midSession && midSession.expired) {
+                        appendRunLog(
+                            "[pipeline] Session expired between steps. Re-capture session, then re-run from the failed step (completed files are kept).",
+                            "stderr"
+                        );
+                        setRunStatus("Pipeline paused: session expired. Capture session and continue.", "warn");
+                        return;
+                    }
+                }
+
                 continue;
             }
 
@@ -1591,11 +1951,11 @@ function handleWorkflowState(payload) {
     }
 
     if (payload.type === "cookie-expired") {
-        elements.phpSessidInput.value = "";
-        elements.cfClearanceInput.value = "";
+        clearSessionFieldsInForm();
         scheduleSettingsSave();
-        appendRunLog(`[cookie] ${payload.message || "Stored cookie expired and was cleared."}`, "stderr");
-        setStatus("Stored cookie expired and was cleared. Paste a fresh cookie.", "warn");
+        appendRunLog(`[session] ${payload.message || "MMF session expired and was cleared."}`, "stderr");
+        setStatus(payload.message || "MMF session expired. Open MyMiniFactory and capture again.", "warn");
+        updateSessionStatusBadge({ valid: false, message: "expired during download" });
         refreshDashboard();
         return;
     }
@@ -1674,28 +2034,61 @@ function handleWorkflowState(payload) {
     }
 }
 
-elements.loadSampleBtn.addEventListener("click", () => {
-    setModelIdEntriesFromText(`${SAMPLE_IDS.join("\n")}\n`);
-    setStatus("Sample IDs loaded.", "ok");
-    refreshDashboard();
-    scheduleSettingsSave();
-});
-
 if (elements.autoLoadMyIdsBtn) {
     elements.autoLoadMyIdsBtn.addEventListener("click", autoLoadOwnModelIds);
 }
 
-elements.clearBtn.addEventListener("click", () => {
-    elements.phpSessidInput.value = "";
-    elements.cfClearanceInput.value = "";
-    elements.jwtInput.value = "";
-    elements.publishableKeyInput.value = "";
-    setModelIdEntriesFromText("");
-    elements.testModeCheck.checked = true;
-    setStatus("Inputs cleared.", "neutral");
-    refreshDashboard();
-    scheduleSettingsSave();
-});
+if (elements.openMmfLoginBtn) {
+    elements.openMmfLoginBtn.addEventListener("click", openMmfLoginFromUi);
+}
+
+if (elements.captureMmfSessionBtn) {
+    elements.captureMmfSessionBtn.addEventListener("click", captureMmfSessionFromUi);
+}
+
+if (elements.clearCatalogBtn) {
+    elements.clearCatalogBtn.addEventListener("click", () => {
+        setModelIdEntriesFromText("");
+        setStatus("Model list cleared.", "neutral");
+        refreshDashboard();
+        scheduleSettingsSave();
+    });
+}
+
+if (elements.clearSessionBtn) {
+    elements.clearSessionBtn.addEventListener("click", async () => {
+        clearSessionFieldsInForm();
+        elements.testModeCheck.checked = true;
+        try {
+            if (mmfDesktopApi && mmfDesktopApi.clearMmfBrowserSession) {
+                await mmfDesktopApi.clearMmfBrowserSession();
+            }
+
+            if (mmfDesktopApi && mmfDesktopApi.saveSettings) {
+                await mmfDesktopApi.saveSettings({
+                    ...getSettingsSnapshot(),
+                    cookie: "",
+                    medusaJwt: "",
+                    medusaPublishableKey: "",
+                    mmfUsername: "",
+                    sessionCapturedAt: ""
+                });
+            }
+        } catch (_error) {
+            // Ignore persistence errors; form was still cleared.
+        }
+
+        setStatus("MMF session cleared (including browser cookies).", "neutral");
+        updateSessionStatusBadge({ valid: false, message: "cleared manually" });
+        refreshDashboard();
+    });
+}
+
+if (elements.checkSessionBtn) {
+    elements.checkSessionBtn.addEventListener("click", () => {
+        checkMmfSessionFromUi(false);
+    });
+}
 
 elements.validateBtn.addEventListener("click", () => {
     const state = refreshDashboard();
@@ -1865,6 +2258,21 @@ elements.clearLogBtn.addEventListener("click", clearRunLog);
     });
 });
 
+document.querySelectorAll(".secret-toggle").forEach((button) => {
+    button.addEventListener("click", () => {
+        const targetId = button.getAttribute("data-target");
+        const targetInput = targetId ? document.getElementById(targetId) : null;
+        if (!targetInput) {
+            return;
+        }
+
+        const reveal = targetInput.type === "password";
+        targetInput.type = reveal ? "text" : "password";
+        button.textContent = reveal ? "Hide" : "Show";
+        button.setAttribute("aria-label", reveal ? "Hide value" : "Show value");
+    });
+});
+
 if (elements.downloadRootInput) {
     elements.downloadRootInput.addEventListener("input", () => {
         updatePathHelperHint();
@@ -1906,13 +2314,14 @@ if (mmfDesktopApi && mmfDesktopApi.onWorkflowState) {
 }
 
 setModelIdEntriesFromText(elements.idsInput.value);
-setupModelIdChipEditor();
+setupModelIdList();
 setRunButtonsState();
 refreshDashboard();
 updatePathHelperHint();
 
 Promise.resolve()
     .then(() => loadSavedSettings())
+    .then(() => checkMmfSessionFromUi(true))
     .then(() => loadRuntimeInfo())
     .then(() => refreshModelJsonList())
     .then(() => runDependencyCheck());

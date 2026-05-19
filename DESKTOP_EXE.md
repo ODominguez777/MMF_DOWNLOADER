@@ -35,11 +35,17 @@ Step 3 and Step 4 execution mode:
 
 The run log panel streams stdout and stderr from the process in real time.
 
+## Session (v1.1)
+
+- **Open MyMiniFactory** opens login or your profile if already signed in.
+- **Capture session** saves cookie, JWT, and publishable key (encrypted when OS keychain is available).
+- **Check session** validates against Medusa `/store/customers/me`.
+- On auth failure during Step 1/2, the full session is cleared; re-capture and re-run (downloads resume, skipping existing files).
+
 ## Cookie persistence behavior
 
-- The session cookie is saved locally in app settings.
-- It is reused automatically between app launches.
-- If an expiration/auth error pattern is detected during Step 1/2 output, the stored cookie is cleared automatically and the UI asks for a new cookie.
+- Credentials are saved in `desktop-settings.json` under AppData (encrypted secrets when possible).
+- Reused between launches until expiry or manual clear.
 
 The app passes configuration to scripts via environment variables:
 
@@ -70,7 +76,7 @@ npm run dist:win
 
 Output installer path:
 
-- `dist\MyMiniFactory Bulk Downloader Setup 1.0.0.exe`
+- `dist\Bulk Downloader Setup 1.1.0.exe`
 
 ## Build macOS packages
 

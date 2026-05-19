@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# MyMiniFactory Bulk STL/ZIP File Downloader (Enhanced Edition)
+# Bulk Downloader — STL/ZIP files, enhanced (Step 2)
 # Downloads actual 3D printable files from a list of model IDs
 # This is STEP 2 - run AFTER the metadata downloader creates JSON files
 # 
@@ -62,6 +62,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Configuration
 TEST_MODE=false
 MAX_CONSECUTIVE_FAILURES=3  # Stop if this many downloads fail in a row
+STL_FILE_DELAY_SEC="${MMF_STL_FILE_DELAY_SEC:-5}"
+IMAGE_DELAY_SEC="${MMF_IMAGE_DELAY_SEC:-3}"
 
 # Parse command line arguments
 if [[ "$1" == "--test" ]]; then
@@ -277,7 +279,7 @@ download_model_images() {
             rm -f "$output_path"
         fi
 
-        sleep 1
+        sleep "$IMAGE_DELAY_SEC"
     done <<< "$image_data"
 }
 
@@ -337,7 +339,7 @@ compress_non_json_assets() {
 }
 
 echo -e "${CYAN}========================================================${NC}"
-echo -e "${CYAN}   MyMiniFactory STL Downloader - Enhanced Edition     ${NC}"
+echo -e "${CYAN}   Bulk Downloader — STL/ZIP (Enhanced Edition)        ${NC}"
 echo -e "${CYAN}========================================================${NC}"
 echo ""
 
@@ -544,8 +546,18 @@ for json_file in ../model_*.json; do
                 continue
             fi
 
-            total_downloads=$((total_downloads + 1))
             output_file="$(unique_output_path "$model_dir" "$filename")"
+
+            if [[ -f "$output_file" ]] && [[ -s "$output_file" ]] && ! is_html_error "$output_file"; then
+                file_size=$(get_file_size "$output_file")
+                echo -e "  ${GREEN}[SKIP] Already downloaded: $(basename "$output_file") (${file_size} bytes)${NC}"
+                successful_downloads=$((successful_downloads + 1))
+                model_file_successful_downloads=$((model_file_successful_downloads + 1))
+                consecutive_failures=0
+                continue
+            fi
+
+            total_downloads=$((total_downloads + 1))
 
             echo -e "  ${YELLOW}Downloading file: $(basename "$output_file")${NC}"
 
@@ -611,7 +623,7 @@ for json_file in ../model_*.json; do
                 fi
             fi
 
-            sleep 2
+            sleep "$STL_FILE_DELAY_SEC"
         done <<< "$download_data"
     fi
 

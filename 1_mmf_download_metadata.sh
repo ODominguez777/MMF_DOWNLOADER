@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# MyMiniFactory Model Metadata Downloader
+# Bulk Downloader — model metadata (Step 1)
 # Downloads JSON metadata for a list of model IDs from MyMiniFactory API
 # This is STEP 1 - run this first to get model metadata, then use the STL downloader
 #
@@ -22,6 +22,8 @@ NC='\033[0m' # No Color
 
 # UPDATE THIS: Get your cookie from browser developer tools (F12 -> Network -> Copy Cookie header)
 COOKIE="${MMF_COOKIE:-REPLACE_WITH_YOUR_ACTUAL_COOKIE_STRING}"
+METADATA_DELAY_SEC="${MMF_METADATA_DELAY_SEC:-6}"
+METADATA_429_BACKOFF_SEC="${MMF_METADATA_429_BACKOFF_SEC:-45}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODEL_IDS_FILE="${MMF_MODEL_IDS_PATH:-${SCRIPT_DIR}/model_ids.txt}"
@@ -60,7 +62,7 @@ current=0
 
 echo -e "${BLUE}Starting download of $total model metadata files...${NC}"
 echo "JSON files will be saved in: $DOWNLOAD_ROOT"
-echo "Rate limited to 20 requests per minute (3 second delay between requests)"
+echo "Rate limited (~10 requests/min, ${METADATA_DELAY_SEC}s delay between requests)"
 echo ""
 
 # Read each ID and download metadata
@@ -69,37 +71,54 @@ while read -r id; do
     [[ -z "$id" ]] && continue
     
     current=$((current + 1))
+
+    if [[ -f "model_${id}.json" ]] && [[ -s "model_${id}.json" ]]; then
+        if grep -q '"id"' "model_${id}.json" 2>/dev/null || grep -q '"name"' "model_${id}.json" 2>/dev/null; then
+            echo -e "${GREEN}[$current/$total] Skipping model $id (metadata already exists — resume safe)${NC}"
+            continue
+        fi
+    fi
+
     echo -e "${BLUE}[$current/$total] Downloading metadata for model $id...${NC}"
     
-    # Make the API request to get model metadata
-    curl --silent \
-        -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0" \
-        -H "Accept: application/json" \
-        -H "Accept-Language: en-US,en;q=0.5" \
-        -H "Accept-Encoding: gzip, deflate, br, zstd" \
-        -H "Referer: https://www.myminifactory.com/api-doc/index.html" \
-        -H "Connection: keep-alive" \
-        -H "Cookie: $COOKIE" \
-        -H "Sec-Fetch-Dest: empty" \
-        -H "Sec-Fetch-Mode: cors" \
-        -H "Sec-Fetch-Site: same-origin" \
-        -H "Priority: u=0" \
-        --compressed \
-        "https://www.myminifactory.com/api/v2/objects/$id" \
-        -o "model_${id}.json"
-    
+    download_metadata_once() {
+        curl --silent \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0" \
+            -H "Accept: application/json" \
+            -H "Accept-Language: en-US,en;q=0.5" \
+            -H "Accept-Encoding: gzip, deflate, br, zstd" \
+            -H "Referer: https://www.myminifactory.com/api-doc/index.html" \
+            -H "Connection: keep-alive" \
+            -H "Cookie: $COOKIE" \
+            -H "Sec-Fetch-Dest: empty" \
+            -H "Sec-Fetch-Mode: cors" \
+            -H "Sec-Fetch-Site: same-origin" \
+            -H "Priority: u=0" \
+            --compressed \
+            -w "%{http_code}" \
+            "https://www.myminifactory.com/api/v2/objects/$id" \
+            -o "model_${id}.json"
+    }
+
+    http_code="$(download_metadata_once)"
+
+    if [[ "$http_code" == "429" ]]; then
+        echo -e "${YELLOW}Rate limited (HTTP 429). Backing off ${METADATA_429_BACKOFF_SEC}s and retrying once...${NC}"
+        sleep "$METADATA_429_BACKOFF_SEC"
+        http_code="$(download_metadata_once)"
+    fi
+
     # Check if download was successful
-    if [[ -f "model_${id}.json" ]] && [[ -s "model_${id}.json" ]]; then
-        echo -e "${GREEN}âœ“ Successfully downloaded metadata for model $id${NC}"
+    if [[ "$http_code" == "200" ]] && [[ -f "model_${id}.json" ]] && [[ -s "model_${id}.json" ]]; then
+        echo -e "${GREEN}Successfully downloaded metadata for model $id${NC}"
     else
-        echo -e "${RED}âœ— Failed to download metadata for model $id${NC}"
-        # Remove empty/failed file
+        echo -e "${RED}Failed to download metadata for model $id (HTTP ${http_code:-unknown})${NC}"
         rm -f "model_${id}.json"
     fi
     
-    # Rate limiting: sleep for 3 seconds (20 requests per minute)
+    # Rate limiting between requests
     if [[ $current -lt $total ]]; then
-        sleep 3
+        sleep "$METADATA_DELAY_SEC"
     fi
     
 done < "$MODEL_IDS_FILE"
