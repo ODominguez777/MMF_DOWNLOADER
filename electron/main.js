@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const https = require("https");
 const { spawn, spawnSync } = require("child_process");
 
 const isWindows = process.platform === "win32";
@@ -36,6 +37,8 @@ configureStoragePaths();
 const SETTINGS_FILE_NAME = "desktop-settings.json";
 const DEFAULT_SETTINGS = {
     cookie: "",
+    medusaJwt: "",
+    medusaPublishableKey: "",
     modelIdsText: "",
     downloadRoot: "",
     testModeCheck: true,
@@ -92,6 +95,10 @@ function sanitizeSettings(raw) {
 
     return {
         cookie: typeof source.cookie === "string" ? source.cookie.trim() : DEFAULT_SETTINGS.cookie,
+        medusaJwt: typeof source.medusaJwt === "string" ? source.medusaJwt.trim() : DEFAULT_SETTINGS.medusaJwt,
+        medusaPublishableKey: typeof source.medusaPublishableKey === "string"
+            ? source.medusaPublishableKey.trim()
+            : DEFAULT_SETTINGS.medusaPublishableKey,
         modelIdsText: typeof source.modelIdsText === "string" ? source.modelIdsText : DEFAULT_SETTINGS.modelIdsText,
         downloadRoot: typeof source.downloadRoot === "string" ? cleanInputPath(source.downloadRoot) : DEFAULT_SETTINGS.downloadRoot,
         testModeCheck: typeof source.testModeCheck === "boolean" ? source.testModeCheck : DEFAULT_SETTINGS.testModeCheck,
@@ -659,6 +666,19 @@ function installMissingDependencies() {
     };
 }
 
+function getDefaultDownloadsPath() {
+    try {
+        const downloadsPath = app.getPath("downloads");
+        if (downloadsPath && downloadsPath.trim()) {
+            return downloadsPath;
+        }
+    } catch (_error) {
+        // Ignore and use fallback below.
+    }
+
+    return path.join(app.getPath("home"), "Downloads");
+}
+
 function resolveWorkflowPaths(rawConfig) {
     const scriptRoot = getScriptRoot();
     const config = rawConfig && typeof rawConfig === "object" ? rawConfig : {};
@@ -669,7 +689,7 @@ function resolveWorkflowPaths(rawConfig) {
         : saved.downloadRoot;
 
     const customDownloadRoot = cleanInputPath(typeof requestedDownloadRoot === "string" ? requestedDownloadRoot : "");
-    const downloadsPath = customDownloadRoot || path.join(scriptRoot, "downloads");
+    const downloadsPath = customDownloadRoot || getDefaultDownloadsPath();
     const stlFilesPath = path.join(downloadsPath, "stl_files");
 
     return {
@@ -872,6 +892,22 @@ function normalizeCookie(cookie) {
     return cookie.trim().replace(/^cookie\s*:\s*/i, "");
 }
 
+function normalizeMedusaJwt(jwt) {
+    if (typeof jwt !== "string") {
+        return "";
+    }
+
+    return jwt.trim().replace(/^bearer\s+/i, "");
+}
+
+function normalizePublishableKey(publishableKey) {
+    if (typeof publishableKey !== "string") {
+        return "";
+    }
+
+    return publishableKey.trim().replace(/^x-publishable-api-key\s*:\s*/i, "");
+}
+
 function parseBoolean(value, fallback = false) {
     if (typeof value === "boolean") {
         return value;
@@ -882,6 +918,200 @@ function parseBoolean(value, fallback = false) {
     }
 
     return fallback;
+}
+
+function compactPreview(value, maxLength = 220) {
+    if (typeof value !== "string") {
+        return "";
+    }
+
+    const singleLine = value.replace(/\s+/g, " ").trim();
+    if (singleLine.length <= maxLength) {
+        return singleLine;
+    }
+
+    return `${singleLine.slice(0, maxLength)}...`;
+}
+
+function requestJson(url, options = {}) {
+    const headers = options.headers && typeof options.headers === "object"
+        ? options.headers
+        : {};
+    const method = typeof options.method === "string" ? options.method : "GET";
+    const timeoutMs = Number.isInteger(options.timeoutMs) ? options.timeoutMs : 25000;
+
+    return new Promise((resolve, reject) => {
+        const req = https.request(url, { method, headers }, (res) => {
+            let raw = "";
+
+            res.setEncoding("utf8");
+            res.on("data", (chunk) => {
+                raw += chunk;
+                if (raw.length > 2_000_000) {
+                    raw = raw.slice(-2_000_000);
+                }
+            });
+
+            res.on("end", () => {
+                let parsed = null;
+                try {
+                    parsed = JSON.parse(raw);
+                } catch (_error) {
+                    parsed = null;
+                }
+
+                resolve({
+                    statusCode: res.statusCode || 0,
+                    headers: res.headers || {},
+                    text: raw,
+                    json: parsed
+                });
+            });
+        });
+
+        req.setTimeout(timeoutMs, () => {
+            req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+        });
+
+        req.on("error", (error) => {
+            reject(error);
+        });
+
+        req.end();
+    });
+}
+
+async function resolveOwnModelIds(rawConfig) {
+    const config = rawConfig && typeof rawConfig === "object" ? rawConfig : {};
+    const saved = loadSettingsFromDisk();
+
+    const cookie = normalizeCookie(config.cookie || saved.cookie || "");
+    const medusaJwt = normalizeMedusaJwt(config.medusaJwt || saved.medusaJwt || "");
+    const medusaPublishableKey = normalizePublishableKey(
+        config.medusaPublishableKey || saved.medusaPublishableKey || ""
+    );
+
+    if (!cookie) {
+        return {
+            ok: false,
+            message: "Cookie is required. Paste PHPSESSID and cf_clearance first."
+        };
+    }
+
+    if (!medusaJwt) {
+        return {
+            ok: false,
+            message: "Medusa JWT is required. Paste medusa_auth_token first."
+        };
+    }
+
+    if (!medusaPublishableKey) {
+        return {
+            ok: false,
+            message: "x-publishable-api-key is required. Paste the pk_ key first."
+        };
+    }
+
+    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0";
+
+    let meResponse;
+    try {
+        meResponse = await requestJson("https://api-shop-manager.myminifactory.com/store/customers/me", {
+            headers: {
+                "User-Agent": userAgent,
+                Accept: "application/json",
+                Authorization: `Bearer ${medusaJwt}`,
+                "x-publishable-api-key": medusaPublishableKey,
+                Cookie: cookie
+            }
+        });
+    } catch (error) {
+        return {
+            ok: false,
+            message: `Failed to call /store/customers/me: ${String(error.message || error)}`
+        };
+    }
+
+    if (meResponse.statusCode !== 200 || !meResponse.json || typeof meResponse.json !== "object") {
+        const preview = compactPreview(meResponse.text);
+        return {
+            ok: false,
+            message: `/store/customers/me returned HTTP ${meResponse.statusCode}.${preview ? ` Body: ${preview}` : ""}`
+        };
+    }
+
+    const mmfId = String(
+        meResponse.json
+            && meResponse.json.customer
+            && meResponse.json.customer.metadata
+            && meResponse.json.customer.metadata.mmf_id
+            ? meResponse.json.customer.metadata.mmf_id
+            : ""
+    ).trim();
+
+    if (!mmfId) {
+        return {
+            ok: false,
+            message: "Could not read customer.metadata.mmf_id from /store/customers/me response."
+        };
+    }
+
+    let previewResponse;
+    try {
+        previewResponse = await requestJson("https://www.myminifactory.com/api/data-library/objectPreviews", {
+            headers: {
+                "User-Agent": userAgent,
+                Accept: "application/json",
+                Cookie: cookie
+            }
+        });
+    } catch (error) {
+        return {
+            ok: false,
+            message: `Failed to call objectPreviews: ${String(error.message || error)}`
+        };
+    }
+
+    if (previewResponse.statusCode !== 200 || !Array.isArray(previewResponse.json)) {
+        const preview = compactPreview(previewResponse.text);
+        return {
+            ok: false,
+            message: `objectPreviews returned HTTP ${previewResponse.statusCode}.${preview ? ` Body: ${preview}` : ""}`
+        };
+    }
+
+    const allObjects = previewResponse.json;
+    const ownObjects = allObjects.filter((item) => {
+        const creatorId = item && item.creatorId !== undefined && item.creatorId !== null
+            ? String(item.creatorId).trim()
+            : "";
+
+        return creatorId === mmfId;
+    });
+
+    const seenIds = new Set();
+    const ids = [];
+
+    ownObjects.forEach((item) => {
+        const originalId = item && item.originalId !== undefined && item.originalId !== null
+            ? String(item.originalId).trim()
+            : "";
+
+        if (!/^\d+$/.test(originalId) || seenIds.has(originalId)) {
+            return;
+        }
+
+        seenIds.add(originalId);
+        ids.push(originalId);
+    });
+
+    return {
+        ok: true,
+        mmfId,
+        totalCount: allObjects.length,
+        ownedCount: ownObjects.length,
+        ids
+    };
 }
 
 function emitRendererEvent(channel, payload) {
@@ -1053,6 +1283,10 @@ function buildStepPlan(stepKey, rawConfig) {
 
     const saved = loadSettingsFromDisk();
     const cookie = normalizeCookie(config.cookie || saved.cookie || "");
+    const medusaJwt = normalizeMedusaJwt(config.medusaJwt || saved.medusaJwt || "");
+    const medusaPublishableKey = normalizePublishableKey(
+        config.medusaPublishableKey || saved.medusaPublishableKey || ""
+    );
     const modelIdsText = normalizeModelIdsText(config.modelIdsText || saved.modelIdsText || "");
     const warnings = [];
 
@@ -1112,6 +1346,8 @@ function buildStepPlan(stepKey, rawConfig) {
             cwd: scriptRoot,
             env: {
                 MMF_COOKIE: cookie,
+                ...(medusaJwt ? { MMF_MEDUSA_JWT: medusaJwt } : {}),
+                ...(medusaPublishableKey ? { MMF_PUBLISHABLE_KEY: medusaPublishableKey } : {}),
                 MMF_DOWNLOAD_ROOT: downloadsPath,
                 MMF_MODEL_IDS_PATH: path.join(scriptRoot, "model_ids.txt"),
                 PATH: processPathWithResolvedJq
@@ -1174,6 +1410,8 @@ function buildStepPlan(stepKey, rawConfig) {
             cwd: downloadsPath,
             env: {
                 MMF_COOKIE: cookie,
+                ...(medusaJwt ? { MMF_MEDUSA_JWT: medusaJwt } : {}),
+                ...(medusaPublishableKey ? { MMF_PUBLISHABLE_KEY: medusaPublishableKey } : {}),
                 PATH: processPathWithResolvedJq
             },
             warnings
@@ -1375,6 +1613,10 @@ ipcMain.handle("desktop:load-settings", async () => {
 
 ipcMain.handle("desktop:save-settings", async (_event, payload) => {
     return saveSettingsToDisk(payload);
+});
+
+ipcMain.handle("desktop:resolve-own-model-ids", async (_event, payload) => {
+    return resolveOwnModelIds(payload);
 });
 
 ipcMain.handle("desktop:start-workflow-step", async (_event, payload) => {

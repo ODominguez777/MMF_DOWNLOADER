@@ -9,12 +9,18 @@
 const elements = {
     phpSessidInput: document.getElementById("phpSessidInput"),
     cfClearanceInput: document.getElementById("cfClearanceInput"),
+    jwtInput: document.getElementById("jwtInput"),
+    publishableKeyInput: document.getElementById("publishableKeyInput"),
+    idsChipEditor: document.getElementById("idsChipEditor"),
+    idsChipList: document.getElementById("idsChipList"),
+    idsChipInput: document.getElementById("idsChipInput"),
     idsInput: document.getElementById("idsInput"),
     downloadRootInput: document.getElementById("downloadRootInput"),
     browseDownloadRootBtn: document.getElementById("browseDownloadRootBtn"),
     openDownloadRootBtn: document.getElementById("openDownloadRootBtn"),
     testModeCheck: document.getElementById("testModeCheck"),
     loadSampleBtn: document.getElementById("loadSampleBtn"),
+    autoLoadMyIdsBtn: document.getElementById("autoLoadMyIdsBtn"),
     clearBtn: document.getElementById("clearBtn"),
     validateBtn: document.getElementById("validateBtn"),
     downloadIdsBtn: document.getElementById("downloadIdsBtn"),
@@ -80,6 +86,7 @@ let settingsSaveTimer = null;
 let settingsApplyInProgress = false;
 let pipelineRunning = false;
 let runtimeInfoCache = null;
+let modelIdEntries = [];
 
 const pendingRunResolvers = new Map();
 
@@ -115,6 +122,184 @@ function parseModelIds(inputText) {
         invalidLines,
         duplicateIds: [...new Set(duplicateIds)]
     };
+}
+
+function parseModelIdTokens(inputText) {
+    return String(inputText || "")
+        .split(/[\s,;]+/)
+        .map((token) => token.trim())
+        .filter((token) => token.length > 0);
+}
+
+function syncIdsTextareaFromEntries() {
+    if (!elements.idsInput) {
+        return;
+    }
+
+    elements.idsInput.value = modelIdEntries.join("\n");
+}
+
+function renderModelIdChips() {
+    if (!elements.idsChipList) {
+        return;
+    }
+
+    elements.idsChipList.innerHTML = "";
+
+    const countByValue = new Map();
+    modelIdEntries.forEach((entry) => {
+        countByValue.set(entry, (countByValue.get(entry) || 0) + 1);
+    });
+
+    modelIdEntries.forEach((entry, index) => {
+        const chip = document.createElement("span");
+        chip.classList.add("id-chip");
+
+        const isNumeric = /^\d+$/.test(entry);
+        const isDuplicate = (countByValue.get(entry) || 0) > 1;
+
+        if (!isNumeric) {
+            chip.classList.add("id-chip-invalid");
+        } else if (isDuplicate) {
+            chip.classList.add("id-chip-duplicate");
+        }
+
+        const valueSpan = document.createElement("span");
+        valueSpan.textContent = entry;
+
+        const removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "id-chip-remove";
+        removeBtn.textContent = "x";
+        removeBtn.dataset.chipIndex = String(index);
+        removeBtn.setAttribute("aria-label", `Remove model ID ${entry}`);
+
+        chip.appendChild(valueSpan);
+        chip.appendChild(removeBtn);
+        elements.idsChipList.appendChild(chip);
+    });
+}
+
+function setModelIdEntriesFromText(inputText) {
+    modelIdEntries = parseModelIdTokens(inputText);
+    syncIdsTextareaFromEntries();
+    renderModelIdChips();
+}
+
+function addModelIdEntriesFromText(inputText) {
+    const tokens = parseModelIdTokens(inputText);
+    if (tokens.length === 0) {
+        return false;
+    }
+
+    modelIdEntries.push(...tokens);
+    syncIdsTextareaFromEntries();
+    renderModelIdChips();
+    return true;
+}
+
+function setupModelIdChipEditor() {
+    if (!elements.idsChipInput || !elements.idsChipList || !elements.idsInput) {
+        return;
+    }
+
+    const commitChipInput = () => {
+        const raw = elements.idsChipInput.value;
+        if (!raw || !raw.trim()) {
+            return false;
+        }
+
+        const added = addModelIdEntriesFromText(raw);
+        elements.idsChipInput.value = "";
+        return added;
+    };
+
+    elements.idsChipInput.addEventListener("keydown", (event) => {
+        const shouldCommit = event.key === "Enter"
+            || event.key === ","
+            || event.key === ";"
+            || (event.key === " " && elements.idsChipInput.value.trim().length > 0);
+
+        if (shouldCommit) {
+            event.preventDefault();
+            if (commitChipInput()) {
+                refreshDashboard();
+                scheduleSettingsSave();
+            }
+            return;
+        }
+
+        if (event.key === "Backspace" && !elements.idsChipInput.value && modelIdEntries.length > 0) {
+            event.preventDefault();
+            modelIdEntries.pop();
+            syncIdsTextareaFromEntries();
+            renderModelIdChips();
+            refreshDashboard();
+            scheduleSettingsSave();
+        }
+    });
+
+    elements.idsChipInput.addEventListener("input", () => {
+        if (!/[\n\r,;\t]/.test(elements.idsChipInput.value)) {
+            return;
+        }
+
+        if (commitChipInput()) {
+            refreshDashboard();
+            scheduleSettingsSave();
+        }
+    });
+
+    elements.idsChipInput.addEventListener("paste", (event) => {
+        const pastedText = event.clipboardData ? event.clipboardData.getData("text") : "";
+        if (!pastedText || !/[\s,;]+/.test(pastedText)) {
+            return;
+        }
+
+        event.preventDefault();
+        if (addModelIdEntriesFromText(pastedText)) {
+            elements.idsChipInput.value = "";
+            refreshDashboard();
+            scheduleSettingsSave();
+        }
+    });
+
+    elements.idsChipInput.addEventListener("blur", () => {
+        if (commitChipInput()) {
+            refreshDashboard();
+            scheduleSettingsSave();
+        }
+    });
+
+    elements.idsChipList.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) {
+            return;
+        }
+
+        const removeBtn = target.closest("button[data-chip-index]");
+        if (!removeBtn) {
+            return;
+        }
+
+        const index = Number.parseInt(removeBtn.dataset.chipIndex || "", 10);
+        if (Number.isNaN(index) || index < 0 || index >= modelIdEntries.length) {
+            return;
+        }
+
+        modelIdEntries.splice(index, 1);
+        syncIdsTextareaFromEntries();
+        renderModelIdChips();
+        refreshDashboard();
+        scheduleSettingsSave();
+        elements.idsChipInput.focus();
+    });
+
+    if (elements.idsChipEditor) {
+        elements.idsChipEditor.addEventListener("click", () => {
+            elements.idsChipInput.focus();
+        });
+    }
 }
 
 function normalizeCookieFieldValue(value, cookieName) {
@@ -171,9 +356,34 @@ function analyzeCookie() {
     };
 }
 
+function normalizeJwtValue(value) {
+    return typeof value === "string"
+        ? value.trim().replace(/^bearer\s+/i, "")
+        : "";
+}
+
+function normalizePublishableKeyValue(value) {
+    return typeof value === "string"
+        ? value.trim().replace(/^x-publishable-api-key\s*:\s*/i, "")
+        : "";
+}
+
+function analyzeMedusaAuth() {
+    const medusaJwt = normalizeJwtValue(elements.jwtInput.value);
+    const medusaPublishableKey = normalizePublishableKeyValue(elements.publishableKeyInput.value);
+
+    return {
+        medusaJwt,
+        medusaPublishableKey,
+        hasMedusaJwt: Boolean(medusaJwt),
+        hasMedusaPublishableKey: Boolean(medusaPublishableKey)
+    };
+}
+
 function buildRequirementState() {
     const idState = parseModelIds(elements.idsInput.value);
     const cookieState = analyzeCookie();
+    const medusaAuthState = analyzeMedusaAuth();
 
     const requirements = [
         {
@@ -195,16 +405,28 @@ function buildRequirementState() {
             help: "Required to avoid Cloudflare HTML error pages."
         },
         {
+            label: "Medusa JWT is provided",
+            pass: medusaAuthState.hasMedusaJwt,
+            required: false,
+            help: "Needed for automatic own-catalog lookup (medusa_auth_token from Local Storage)."
+        },
+        {
+            label: "x-publishable-api-key is provided",
+            pass: medusaAuthState.hasMedusaPublishableKey,
+            required: false,
+            help: "Needed with JWT to call /store/customers/me and resolve your mmf_id automatically."
+        },
+        {
             label: "At least one model ID is present",
             pass: idState.validIds.length > 0,
             required: true,
-            help: "Create model_ids.txt with one numeric ID per line."
+            help: "Add at least one numeric model ID chip."
         },
         {
             label: "All non-empty lines are numeric model IDs",
             pass: idState.invalidLines.length === 0,
             required: true,
-            help: "Remove URLs, commas, and text from the IDs box."
+            help: "Remove invalid values from the ID chips."
         },
         {
             label: "No duplicate model IDs",
@@ -227,6 +449,7 @@ function buildRequirementState() {
     return {
         idState,
         cookieState,
+        medusaAuthState,
         requirements,
         requiredTotal,
         requiredPassed,
@@ -362,6 +585,8 @@ function refreshDashboard() {
 function getSettingsSnapshot() {
     return {
         cookie: buildCookieFromInputs(),
+        medusaJwt: normalizeJwtValue(elements.jwtInput.value),
+        medusaPublishableKey: normalizePublishableKeyValue(elements.publishableKeyInput.value),
         modelIdsText: elements.idsInput.value,
         downloadRoot: elements.downloadRootInput.value,
         testModeCheck: elements.testModeCheck.checked,
@@ -386,7 +611,16 @@ function applySettingsToForm(settings) {
         elements.phpSessidInput.value = parts.phpSessid;
         elements.cfClearanceInput.value = parts.cfClearance;
     }
-    elements.idsInput.value = typeof settings.modelIdsText === "string" ? settings.modelIdsText : elements.idsInput.value;
+    if (typeof settings.medusaJwt === "string") {
+        elements.jwtInput.value = normalizeJwtValue(settings.medusaJwt);
+    }
+    if (typeof settings.medusaPublishableKey === "string") {
+        elements.publishableKeyInput.value = normalizePublishableKeyValue(settings.medusaPublishableKey);
+    }
+    const modelIdsText = typeof settings.modelIdsText === "string"
+        ? settings.modelIdsText
+        : elements.idsInput.value;
+    setModelIdEntriesFromText(modelIdsText);
     elements.downloadRootInput.value = typeof settings.downloadRoot === "string" ? settings.downloadRoot : elements.downloadRootInput.value;
     elements.testModeCheck.checked = typeof settings.testModeCheck === "boolean"
         ? settings.testModeCheck
@@ -537,6 +771,74 @@ async function copyText(text) {
     helper.remove();
 }
 
+async function autoLoadOwnModelIds() {
+    if (!mmfDesktopApi || !mmfDesktopApi.resolveOwnModelIds) {
+        setStatus("Auto-load is available only in desktop mode.", "warn");
+        return;
+    }
+
+    if (modelIdEntries.length > 0) {
+        const confirmed = window.confirm("Replace current Model IDs with your auto-loaded IDs?");
+        if (!confirmed) {
+            setStatus("Auto-load canceled.", "warn");
+            return;
+        }
+    }
+
+    const button = elements.autoLoadMyIdsBtn;
+    const previousLabel = button ? button.textContent : "";
+
+    if (button) {
+        button.disabled = true;
+        button.textContent = "Loading...";
+    }
+
+    setStatus("Resolving your mmf_id and loading your own catalog IDs...", "neutral");
+
+    try {
+        const response = await mmfDesktopApi.resolveOwnModelIds({
+            cookie: buildCookieFromInputs(),
+            medusaJwt: normalizeJwtValue(elements.jwtInput.value),
+            medusaPublishableKey: normalizePublishableKeyValue(elements.publishableKeyInput.value)
+        });
+
+        if (!response || !response.ok) {
+            setStatus(response && response.message ? response.message : "Failed to auto-load your IDs.", "bad");
+            return;
+        }
+
+        const normalizedIds = Array.isArray(response.ids)
+            ? response.ids
+                .map((id) => String(id || "").trim())
+                .filter((id) => /^\d+$/.test(id))
+            : [];
+
+        if (normalizedIds.length === 0) {
+            setStatus(
+                `No creator-owned IDs found for mmf_id ${response.mmfId || "unknown"} in objectPreviews.`,
+                "warn"
+            );
+            return;
+        }
+
+        setModelIdEntriesFromText(`${normalizedIds.join("\n")}\n`);
+        refreshDashboard();
+        scheduleSettingsSave();
+
+        setStatus(
+            `Loaded ${normalizedIds.length} IDs from your own catalog (mmf_id ${response.mmfId}).`,
+            "ok"
+        );
+    } catch (err) {
+        setStatus(`Auto-load failed: ${String(err?.message || err)}`, "bad");
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = previousLabel || "Auto load my IDs";
+        }
+    }
+}
+
 function buildCommandPlan() {
     const downloadsPath = getActiveDownloadsPath() || "<your-download-folder>";
 
@@ -549,7 +851,7 @@ function buildCommandPlan() {
         "bash ../mmf_download_stl_files_enhanced.sh --test",
         "bash ../mmf_download_stl_files_enhanced.sh",
         "",
-        "# Step 2 output per model: model_<id>.json (compact) + assets.zip + images/"
+        "# Step 2 output per model: model_<id>.json (compact) + <model_name>.zip + images/"
     ].join("\n");
 }
 
@@ -953,6 +1255,8 @@ async function loadRuntimeInfo() {
 function collectExecutionConfig() {
     return {
         cookie: buildCookieFromInputs(),
+        medusaJwt: normalizeJwtValue(elements.jwtInput.value),
+        medusaPublishableKey: normalizePublishableKeyValue(elements.publishableKeyInput.value),
         modelIdsText: elements.idsInput.value,
         downloadRoot: elements.downloadRootInput.value,
         basePath: elements.basePathInput.value,
@@ -1355,16 +1659,22 @@ function handleWorkflowState(payload) {
 }
 
 elements.loadSampleBtn.addEventListener("click", () => {
-    elements.idsInput.value = `${SAMPLE_IDS.join("\n")}\n`;
+    setModelIdEntriesFromText(`${SAMPLE_IDS.join("\n")}\n`);
     setStatus("Sample IDs loaded.", "ok");
     refreshDashboard();
     scheduleSettingsSave();
 });
 
+if (elements.autoLoadMyIdsBtn) {
+    elements.autoLoadMyIdsBtn.addEventListener("click", autoLoadOwnModelIds);
+}
+
 elements.clearBtn.addEventListener("click", () => {
     elements.phpSessidInput.value = "";
     elements.cfClearanceInput.value = "";
-    elements.idsInput.value = "";
+    elements.jwtInput.value = "";
+    elements.publishableKeyInput.value = "";
+    setModelIdEntriesFromText("");
     elements.testModeCheck.checked = true;
     setStatus("Inputs cleared.", "neutral");
     refreshDashboard();
@@ -1528,7 +1838,7 @@ if (elements.runPostProcessBtn) {
 elements.stopRunBtn.addEventListener("click", stopWorkflowStep);
 elements.clearLogBtn.addEventListener("click", clearRunLog);
 
-[elements.phpSessidInput, elements.cfClearanceInput, elements.idsInput, elements.testModeCheck].forEach((input) => {
+[elements.phpSessidInput, elements.cfClearanceInput, elements.jwtInput, elements.publishableKeyInput, elements.testModeCheck].forEach((input) => {
     input.addEventListener("input", () => {
         refreshDashboard();
         scheduleSettingsSave();
@@ -1579,6 +1889,8 @@ if (mmfDesktopApi && mmfDesktopApi.onWorkflowState) {
     mmfDesktopApi.onWorkflowState(handleWorkflowState);
 }
 
+setModelIdEntriesFromText(elements.idsInput.value);
+setupModelIdChipEditor();
 setRunButtonsState();
 refreshDashboard();
 updatePathHelperHint();

@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("desktopApi", {
     readModelJsonFile: (payload) => ipcRenderer.invoke("desktop:read-model-json-file", payload),
     loadSettings: () => ipcRenderer.invoke("desktop:load-settings"),
     saveSettings: (payload) => ipcRenderer.invoke("desktop:save-settings", payload),
+    resolveOwnModelIds: (payload) => ipcRenderer.invoke("desktop:resolve-own-model-ids", payload),
     startWorkflowStep: (payload) => ipcRenderer.invoke("desktop:start-workflow-step", payload),
     stopWorkflowStep: () => ipcRenderer.invoke("desktop:stop-workflow-step"),
     onWorkflowLog: (handler) => {

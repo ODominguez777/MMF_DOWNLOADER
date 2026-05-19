@@ -182,6 +182,13 @@ write_compact_model_json() {
             if .price == null or .price == "" then 5
             elif (.price | type) == "number" then .price
             elif (.price | type) == "string" then ((.price | tonumber?) // 5)
+            elif (.price | type) == "object" then (
+                if .price.value == null or .price.value == "" then 5
+                elif (.price.value | type) == "number" then .price.value
+                elif (.price.value | type) == "string" then ((.price.value | tonumber?) // 5)
+                else 5
+                end
+            )
             else 5
             end
         )
@@ -275,8 +282,23 @@ download_model_images() {
 
 compress_non_json_assets() {
     local model_dir="$1"
-    local archive_name="assets.zip"
-    local archive_path="${model_dir}/${archive_name}"
+    local source_json="$2"
+    local model_id="$3"
+    local model_name=""
+    local archive_base=""
+
+    model_name=$($JQ_CMD -r '.name // ""' "$source_json" 2>/dev/null | tr -d '\r' | xargs)
+    archive_base=$(sanitize_filename "$model_name")
+
+    if [[ -z "$archive_base" || "$archive_base" == "null" ]]; then
+        archive_base="model_${model_id}_assets"
+    fi
+
+    local archive_name="${archive_base}.zip"
+    local archive_path
+    archive_path=$(unique_output_path "$model_dir" "$archive_name")
+    archive_name=$(basename "$archive_path")
+
     local -a files_to_zip=()
 
     while IFS= read -r file_path; do
@@ -305,11 +327,11 @@ compress_non_json_assets() {
         done
         local zip_size
         zip_size=$(get_file_size "$archive_path")
-        echo -e "  ${GREEN}[OK] Created assets.zip (${zip_size} bytes)${NC}"
+        echo -e "  ${GREEN}[OK] Created $(basename "$archive_path") (${zip_size} bytes)${NC}"
         return 0
     fi
 
-    echo -e "  ${RED}[FAIL] Failed to create assets.zip${NC}"
+    echo -e "  ${RED}[FAIL] Failed to create $(basename "$archive_path")${NC}"
     return 1
 }
 
@@ -370,14 +392,18 @@ if [[ "$TEST_MODE" == true ]]; then
     # Find first JSON file with download URLs
     for json_file in ../model_*.json; do
         model_id=$(basename "$json_file" | sed 's/model_//; s/.json//')
-        download_data=$($JQ_CMD -r '.files.items[]? | "\(.filename // "")|\(.download_url // "")"' "$json_file" 2>/dev/null)
-        
-        if [[ -n "$download_data" ]]; then
+        test_line=$($JQ_CMD -r '.files.items[]? | select(.download_url != null and .download_url != "") | "\(.filename // "")|\(.download_url)"' "$json_file" 2>/dev/null | head -1)
+
+        if [[ -n "$test_line" ]]; then
             echo -e "${BLUE}Testing with model $model_id${NC}"
             
             # Get first file from this model
-            filename=$(echo "$download_data" | head -1 | cut -d'|' -f1 | tr -d '\r' | xargs)
-            download_url=$(echo "$download_data" | head -1 | cut -d'|' -f2 | tr -d '\r' | xargs)
+            filename=$(echo "$test_line" | cut -d'|' -f1 | tr -d '\r' | xargs)
+            download_url=$(echo "$test_line" | cut -d'|' -f2 | tr -d '\r' | xargs)
+
+            if [[ -z "$download_url" || "$download_url" == "null" ]]; then
+                continue
+            fi
             
             echo -e "  Downloading: ${CYAN}$filename${NC}"
             
@@ -424,10 +450,16 @@ if [[ "$TEST_MODE" == true ]]; then
                 rm -f "$test_file"
                 exit 0
             fi
+        else
+            is_bought=$($JQ_CMD -r '.is_bought // "unknown"' "$json_file" 2>/dev/null)
+            if [[ "$is_bought" == "false" ]]; then
+                echo -e "${YELLOW}! Skipping model $model_id in test mode: object is not in your library (is_bought=false).${NC}"
+            fi
         fi
     done
     
-    echo -e "${RED}No models with download URLs found for testing${NC}"
+    echo -e "${RED}No downloadable files found for testing${NC}"
+    echo -e "${YELLOW}If the listed models are not owned, this is expected. Use owned models for --test.${NC}"
     exit 1
 fi
 
@@ -443,6 +475,8 @@ successful_downloads=0
 consecutive_failures=0
 compact_json_written=0
 zip_created=0
+not_owned_skipped=0
+models_without_file_downloads=0
 
 # Process each JSON file
 for json_file in ../model_*.json; do
@@ -451,29 +485,55 @@ for json_file in ../model_*.json; do
 
     echo -e "${BLUE}[$current_file/$json_count] Processing model $model_id...${NC}"
 
+    is_bought=$($JQ_CMD -r '.is_bought // "unknown"' "$json_file" 2>/dev/null)
+    downloadable_file_count=$($JQ_CMD -r '[.files.items[]? | .download_url | select(. != null and . != "")] | length' "$json_file" 2>/dev/null)
+    if [[ ! "$downloadable_file_count" =~ ^[0-9]+$ ]]; then
+        downloadable_file_count=0
+    fi
+
+    # Copyright and ownership guard: if no downloadable STL/ZIP URLs exist,
+    # do not create any output for this model (no metadata, no images).
+    if [[ "$downloadable_file_count" -eq 0 ]]; then
+        if [[ "$is_bought" == "false" ]]; then
+            not_owned_skipped=$((not_owned_skipped + 1))
+            models_without_file_downloads=$((models_without_file_downloads + 1))
+            echo -e "${YELLOW}  ! Object is not in your library (is_bought=false). Skipping model output for model $model_id.${NC}"
+        else
+            models_without_file_downloads=$((models_without_file_downloads + 1))
+            echo -e "${YELLOW}  ! No downloadable STL/ZIP URLs found in metadata. Skipping model output.${NC}"
+        fi
+        echo ""
+        continue
+    fi
+
     # Create directory for this model
     model_dir="model_${model_id}"
     mkdir -p "$model_dir"
-
-    # Build compact JSON with only required fields
-    if write_compact_model_json "$json_file" "$model_dir" "$model_id"; then
-        compact_json_written=$((compact_json_written + 1))
-    fi
+    model_file_successful_downloads=0
 
     # Extract downloadable files from metadata
     download_data=$($JQ_CMD -r '.files.items[]? | "\(.filename // "")|\(.download_url // "")"' "$json_file" 2>/dev/null)
 
     if [[ -z "$download_data" ]]; then
-        echo -e "${YELLOW}  ! No STL/ZIP file URLs found in metadata${NC}"
+        echo -e "${YELLOW}  ! No STL/ZIP file URLs found in metadata. Skipping model output.${NC}"
+        rm -rf "$model_dir"
+        models_without_file_downloads=$((models_without_file_downloads + 1))
+        echo ""
+        continue
     else
         while IFS='|' read -r filename download_url; do
-            if [[ -z "$filename" || -z "$download_url" ]]; then
+            if [[ -z "$filename" ]]; then
                 continue
             fi
 
             filename=$(echo "$filename" | tr -d '\r' | xargs)
             filename=$(sanitize_filename "$filename")
             download_url=$(echo "$download_url" | tr -d '\r' | xargs)
+
+            if [[ -z "$download_url" || "$download_url" == "null" ]]; then
+                echo -e "  ${YELLOW}! Skipping $filename: no download URL (likely not owned or unavailable).${NC}"
+                continue
+            fi
 
             total_downloads=$((total_downloads + 1))
             output_file="$(unique_output_path "$model_dir" "$filename")"
@@ -526,6 +586,7 @@ for json_file in ../model_*.json; do
                     file_size=$(get_file_size "$output_file")
                     echo -e "  ${GREEN}[OK] Downloaded $(basename "$output_file") (${file_size} bytes)${NC}"
                     successful_downloads=$((successful_downloads + 1))
+                    model_file_successful_downloads=$((model_file_successful_downloads + 1))
                     consecutive_failures=0
                 fi
             else
@@ -545,11 +606,24 @@ for json_file in ../model_*.json; do
         done <<< "$download_data"
     fi
 
-    # Download only original images from metadata
+    if [[ "$model_file_successful_downloads" -eq 0 ]]; then
+        echo -e "${YELLOW}  ! No files could be downloaded for model $model_id. Removing metadata/images output for copyright compliance.${NC}"
+        rm -rf "$model_dir"
+        models_without_file_downloads=$((models_without_file_downloads + 1))
+        echo ""
+        continue
+    fi
+
+    # Build compact JSON only when at least one STL/ZIP file was downloaded.
+    if write_compact_model_json "$json_file" "$model_dir" "$model_id"; then
+        compact_json_written=$((compact_json_written + 1))
+    fi
+
+    # Download images only when the model has at least one successfully downloaded file.
     download_model_images "$json_file" "$model_dir"
 
     # Compress only model root files to a zip archive; images stay in model_<id>/images
-    if compress_non_json_assets "$model_dir"; then
+    if compress_non_json_assets "$model_dir" "$json_file" "$model_id"; then
         zip_created=$((zip_created + 1))
     fi
 
@@ -563,9 +637,15 @@ echo -e "${GREEN}Successful downloads: $successful_downloads/$total_downloads fi
 if [[ $((total_downloads - successful_downloads)) -gt 0 ]]; then
     echo -e "${YELLOW}Failed downloads: $((total_downloads - successful_downloads))${NC}"
 fi
+if [[ "$not_owned_skipped" -gt 0 ]]; then
+    echo -e "${YELLOW}Skipped models not owned: $not_owned_skipped${NC}"
+fi
+if [[ "$models_without_file_downloads" -gt 0 ]]; then
+    echo -e "${YELLOW}Skipped model outputs with zero downloaded files: $models_without_file_downloads${NC}"
+fi
 echo -e "${GREEN}Compact JSON files written: $compact_json_written${NC}"
 echo -e "${GREEN}ZIP archives created: $zip_created${NC}"
-echo -e "${BLUE}Output structure: stl_files/model_<id>/model_<id>.json + assets.zip + images/${NC}"
+echo -e "${BLUE}Output structure: stl_files/model_<id>/model_<id>.json + <model_name>.zip + images/${NC}"
 echo ""
 
 echo "Sample of generated directories:"

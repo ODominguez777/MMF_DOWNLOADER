@@ -75,8 +75,22 @@
                 <p class="hint">Copy the value after PHPSESSID= into the first input and the value after cf_clearance= into the second input.</p>
                 <p class="hint">Cookie values are saved locally and cleared if an expiration/authentication error is detected.</p>
 
-                <label for="idsInput">Model IDs (one per line)</label>
-                <textarea id="idsInput" rows="8" placeholder="409352&#10;409348&#10;496377"></textarea>
+                    <label for="jwtInput">Medusa JWT (medusa_auth_token)</label>
+                    <input id="jwtInput" type="text" placeholder="Paste medusa_auth_token JWT from Local Storage">
+                    <p class="hint">How to get JWT: MMF → press F12 → Application tab → Local Storage → https://www.myminifactory.com → copy medusa_auth_token value.</p>
+
+                    <label for="publishableKeyInput">x-publishable-api-key (pk...)</label>
+                    <input id="publishableKeyInput" type="text" placeholder="Paste key that starts with pk_">
+                    <p class="hint">How to get publishable key: Open DevTools first (F12), then navigate to your MMF profile so Network can capture requests → in Network filter me → open the request/response that references /store/customers/me → copy the key that starts with pk_.</p>
+                    <p class="hint">These values are stored locally and are used for automatic "my catalog only" filtering by creatorId.</p>
+
+                <label for="idsChipInput">Model IDs</label>
+                <div id="idsChipEditor" class="ids-chip-editor" aria-label="Model IDs chip editor">
+                    <div id="idsChipList" class="ids-chip-list"></div>
+                    <input id="idsChipInput" type="text" placeholder="Type an ID and press Enter, comma, or paste many IDs">
+                </div>
+                <textarea id="idsInput" class="hidden" rows="8" placeholder="409352&#10;409348&#10;496377"></textarea>
+                <p class="hint">You can paste a full list (with spaces, commas, or line breaks). Click x on any chip to remove it.</p>
 
                 <label for="downloadRootInput">Download folder</label>
                 <div class="path-picker">
@@ -84,7 +98,7 @@
                     <button id="browseDownloadRootBtn" type="button" class="btn btn-secondary btn-inline">Browse...</button>
                     <button id="openDownloadRootBtn" type="button" class="btn btn-secondary btn-inline">Open folder</button>
                 </div>
-                <p class="hint">Step 1 and Step 2 use this folder. If empty, default is downloads inside the project.</p>
+                <p class="hint">Step 1 and Step 2 use this folder. If empty, default is your system Downloads folder.</p>
 
                 <label class="checkline" for="testModeCheck">
                     <input id="testModeCheck" type="checkbox" checked>
@@ -93,9 +107,11 @@
 
                 <div class="button-row">
                     <button id="loadSampleBtn" type="button" class="btn btn-secondary">Load sample</button>
+                    <button id="autoLoadMyIdsBtn" type="button" class="btn btn-secondary">Auto load my IDs</button>
                     <button id="clearBtn" type="button" class="btn btn-secondary">Clear</button>
                     <button id="validateBtn" type="button" class="btn btn-primary">Validate setup</button>
                 </div>
+                <p class="hint">Auto load my IDs uses cookie + medusa_auth_token JWT + x-publishable-api-key to fetch your mmf_id and keep only creatorId matches.</p>
 
                 <p id="statusMessage" class="status status-neutral">Ready to validate.</p>
             </section>
@@ -146,7 +162,7 @@
                 </li>
                 <li>
                     <strong>Step 2 output per model folder</strong>
-                    <code>stl_files/model_&lt;id&gt;/model_&lt;id&gt;.json + assets.zip + images/</code>
+                    <code>stl_files/model_&lt;id&gt;/model_&lt;id&gt;.json + &lt;model_name&gt;.zip + images/</code>
                 </li>
             </ol>
 
