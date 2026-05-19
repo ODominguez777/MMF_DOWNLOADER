@@ -207,10 +207,56 @@ function firstLine(text) {
     return text.split(/\r?\n/)[0].trim();
 }
 
+function isExecutableFile(filePath) {
+    if (!filePath || !fs.existsSync(filePath)) {
+        return false;
+    }
+
+    try {
+        const stat = fs.statSync(filePath);
+        if (!stat.isFile()) {
+            return false;
+        }
+
+        if (isWindows) {
+            return /\.(exe|cmd|bat|com)$/i.test(filePath);
+        }
+
+        fs.accessSync(filePath, fs.constants.X_OK);
+        return true;
+    } catch (_error) {
+        return false;
+    }
+}
+
+function findUnixCommandFallback(command) {
+    if (isWindows || !command) {
+        return "";
+    }
+
+    const commonRoots = isMac
+        ? ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        : ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"];
+
+    for (const root of commonRoots) {
+        const candidate = path.join(root, command);
+        if (isExecutableFile(candidate)) {
+            return candidate;
+        }
+    }
+
+    return "";
+}
+
 function whereCommand(command) {
     if (!isWindows) {
         const result = runCommand("which", [command]);
-        return result.ok ? firstLine(result.stdout) : "";
+        const resolved = result.ok ? firstLine(result.stdout) : "";
+        if (resolved) {
+            return resolved;
+        }
+
+        return findUnixCommandFallback(command);
     }
 
     const result = runCommand("where.exe", [command]);
@@ -571,9 +617,9 @@ function getDependencySummary() {
     };
 }
 
-function installDependencyViaWinget(packageId) {
+function installDependencyViaWinget(packageId, wingetExecutable = "winget") {
     return runCommand(
-        "winget",
+        wingetExecutable,
         [
             "install",
             "--id",
@@ -586,9 +632,9 @@ function installDependencyViaWinget(packageId) {
     );
 }
 
-function installDependencyViaBrew(packageName) {
+function installDependencyViaBrew(packageName, brewExecutable = "brew") {
     return runCommand(
-        "brew",
+        brewExecutable,
         ["install", packageName],
         15 * 60 * 1000
     );
@@ -626,12 +672,16 @@ function installMissingDependencies() {
     const logLines = [];
     let allSucceeded = true;
     const installerName = summaryBefore.installMethod;
+    const installerDependency = summaryBefore.dependencies.find((dep) => dep.key === installerName);
+    const installerExecutable = installerDependency && installerDependency.path
+        ? installerDependency.path
+        : installerName;
 
     for (const dep of missingInstallable) {
         logLines.push(`Installing ${dep.displayName} using ${installerName} package ${dep.packageId}...`);
         const result = installerName === "winget"
-            ? installDependencyViaWinget(dep.packageId)
-            : installDependencyViaBrew(dep.packageId);
+            ? installDependencyViaWinget(dep.packageId, installerExecutable)
+            : installDependencyViaBrew(dep.packageId, installerExecutable);
 
         if (result.ok) {
             logLines.push(`SUCCESS: ${dep.displayName}`);
@@ -1419,51 +1469,51 @@ function buildStepPlan(stepKey, rawConfig) {
     }
 
     if (stepKey === "step3") {
-        if (!powerShellPath) {
-            return {
-                accepted: false,
-                message: "PowerShell was not found."
-            };
-        }
-
-        const scriptPath = path.join(scriptRoot, "3_extract_all_zips.ps1");
-        if (!ensureFileExists(scriptPath)) {
-            return {
-                accepted: false,
-                message: `Script not found: ${scriptPath}`
-            };
-        }
-
         const basePath = cleanInputPath(config.basePath || saved.basePath) || stlFilesPath;
         const extractInPlace = parseBoolean(
             config.extractInPlace !== undefined ? config.extractInPlace : saved.extractInPlace,
             true
         );
 
-        return {
-            accepted: true,
-            stepKey,
-            label: "Step 3 - Extract ZIP files",
-            command: powerShellPath,
-            args: getPowerShellFileArgs(scriptPath),
-            cwd: scriptRoot,
-            env: {
-                MMF_BASE_PATH: basePath,
-                MMF_EXTRACT_IN_PLACE: extractInPlace ? "true" : "false"
-            },
-            warnings
-        };
-    }
+        if (isWindows) {
+            if (!powerShellPath) {
+                return {
+                    accepted: false,
+                    message: "PowerShell was not found."
+                };
+            }
 
-    if (stepKey === "step4") {
-        if (!powerShellPath) {
+            const scriptPath = path.join(scriptRoot, "3_extract_all_zips.ps1");
+            if (!ensureFileExists(scriptPath)) {
+                return {
+                    accepted: false,
+                    message: `Script not found: ${scriptPath}`
+                };
+            }
+
             return {
-                accepted: false,
-                message: "PowerShell was not found."
+                accepted: true,
+                stepKey,
+                label: "Step 3 - Extract ZIP files",
+                command: powerShellPath,
+                args: getPowerShellFileArgs(scriptPath),
+                cwd: scriptRoot,
+                env: {
+                    MMF_BASE_PATH: basePath,
+                    MMF_EXTRACT_IN_PLACE: extractInPlace ? "true" : "false"
+                },
+                warnings
             };
         }
 
-        const scriptPath = path.join(scriptRoot, "4_rename_folders_from_json.ps1");
+        if (!bashPath) {
+            return {
+                accepted: false,
+                message: "Bash was not found."
+            };
+        }
+
+        const scriptPath = path.join(scriptRoot, "3_extract_all_zips.sh");
         if (!ensureFileExists(scriptPath)) {
             return {
                 accepted: false,
@@ -1471,6 +1521,23 @@ function buildStepPlan(stepKey, rawConfig) {
             };
         }
 
+        return {
+            accepted: true,
+            stepKey,
+            label: "Step 3 - Extract ZIP files",
+            command: bashPath,
+            args: [toBashScriptPath(scriptPath)],
+            cwd: scriptRoot,
+            env: {
+                MMF_BASE_PATH: basePath,
+                MMF_EXTRACT_IN_PLACE: extractInPlace ? "true" : "false",
+                PATH: processPathWithResolvedJq
+            },
+            warnings
+        };
+    }
+
+    if (stepKey === "step4") {
         const jsonPath = cleanInputPath(config.jsonPath || saved.jsonPath) || downloadsPath;
         const foldersPath = cleanInputPath(config.foldersPath || saved.foldersPath) || stlFilesPath;
         const namingFormatSource = config.namingFormat || saved.namingFormat;
@@ -1483,18 +1550,67 @@ function buildStepPlan(stepKey, rawConfig) {
             ? 80
             : Math.max(10, Math.min(160, maxNameLengthInput));
 
+        if (isWindows) {
+            if (!powerShellPath) {
+                return {
+                    accepted: false,
+                    message: "PowerShell was not found."
+                };
+            }
+
+            const scriptPath = path.join(scriptRoot, "4_rename_folders_from_json.ps1");
+            if (!ensureFileExists(scriptPath)) {
+                return {
+                    accepted: false,
+                    message: `Script not found: ${scriptPath}`
+                };
+            }
+
+            return {
+                accepted: true,
+                stepKey,
+                label: "Step 4 - Rename folders from JSON",
+                command: powerShellPath,
+                args: getPowerShellFileArgs(scriptPath),
+                cwd: scriptRoot,
+                env: {
+                    MMF_JSON_PATH: jsonPath,
+                    MMF_FOLDERS_PATH: foldersPath,
+                    MMF_NAMING_FORMAT: namingFormat,
+                    MMF_MAX_NAME_LENGTH: String(maxNameLength)
+                },
+                warnings
+            };
+        }
+
+        if (!bashPath) {
+            return {
+                accepted: false,
+                message: "Bash was not found."
+            };
+        }
+
+        const scriptPath = path.join(scriptRoot, "4_rename_folders_from_json.sh");
+        if (!ensureFileExists(scriptPath)) {
+            return {
+                accepted: false,
+                message: `Script not found: ${scriptPath}`
+            };
+        }
+
         return {
             accepted: true,
             stepKey,
             label: "Step 4 - Rename folders from JSON",
-            command: powerShellPath,
-            args: getPowerShellFileArgs(scriptPath),
+            command: bashPath,
+            args: [toBashScriptPath(scriptPath)],
             cwd: scriptRoot,
             env: {
                 MMF_JSON_PATH: jsonPath,
                 MMF_FOLDERS_PATH: foldersPath,
                 MMF_NAMING_FORMAT: namingFormat,
-                MMF_MAX_NAME_LENGTH: String(maxNameLength)
+                MMF_MAX_NAME_LENGTH: String(maxNameLength),
+                PATH: processPathWithResolvedJq
             },
             warnings
         };

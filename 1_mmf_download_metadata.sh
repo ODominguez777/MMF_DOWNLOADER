@@ -44,7 +44,9 @@ cd "$DOWNLOAD_ROOT" || exit
 # Fix Windows line endings if present (common issue)
 if grep -q $'\r' "$MODEL_IDS_FILE"; then
     echo -e "${BLUE}Fixing Windows line endings in model_ids.txt...${NC}"
-    sed -i 's/\r$//' "$MODEL_IDS_FILE"
+    temp_ids_file="$(mktemp "${TMPDIR:-/tmp}/model_ids.XXXXXX")"
+    tr -d '\r' < "$MODEL_IDS_FILE" > "$temp_ids_file"
+    mv "$temp_ids_file" "$MODEL_IDS_FILE"
 fi
 
 # Count total models
@@ -88,9 +90,9 @@ while read -r id; do
     
     # Check if download was successful
     if [[ -f "model_${id}.json" ]] && [[ -s "model_${id}.json" ]]; then
-        echo -e "${GREEN}✓ Successfully downloaded metadata for model $id${NC}"
+        echo -e "${GREEN}âœ“ Successfully downloaded metadata for model $id${NC}"
     else
-        echo -e "${RED}✗ Failed to download metadata for model $id${NC}"
+        echo -e "${RED}âœ— Failed to download metadata for model $id${NC}"
         # Remove empty/failed file
         rm -f "model_${id}.json"
     fi

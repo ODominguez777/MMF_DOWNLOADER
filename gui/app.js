@@ -855,20 +855,36 @@ function buildCommandPlan() {
     ].join("\n");
 }
 
-function buildPowerShellSnippet() {
+function buildPostProcessSnippet() {
     const maxLength = Number.parseInt(elements.maxLengthInput.value, 10);
     const safeLength = Number.isNaN(maxLength) ? 80 : Math.max(10, Math.min(160, maxLength));
 
+    if (runtimePlatform === "win32") {
+        return [
+            "# 3_extract_all_zips.ps1",
+            `$BASE_PATH = \"${elements.basePathInput.value.trim()}\"`,
+            `$EXTRACT_IN_PLACE = $${elements.extractModeSelect.value}`,
+            "",
+            "# 4_rename_folders_from_json.ps1",
+            `$JSON_PATH = \"${elements.jsonPathInput.value.trim()}\"`,
+            `$FOLDERS_PATH = \"${elements.foldersPathInput.value.trim()}\"`,
+            `$NAMING_FORMAT = \"${elements.namingFormatSelect.value}\"`,
+            `$MAX_NAME_LENGTH = ${safeLength}`
+        ].join("\n");
+    }
+
     return [
-        "# 3_extract_all_zips.ps1",
-        `$BASE_PATH = \"${elements.basePathInput.value.trim()}\"`,
-        `$EXTRACT_IN_PLACE = $${elements.extractModeSelect.value}`,
+        "# 3_extract_all_zips.sh",
+        `export MMF_BASE_PATH=\"${elements.basePathInput.value.trim()}\"`,
+        `export MMF_EXTRACT_IN_PLACE=\"${elements.extractModeSelect.value}\"`,
+        "bash 3_extract_all_zips.sh",
         "",
-        "# 4_rename_folders_from_json.ps1",
-        `$JSON_PATH = \"${elements.jsonPathInput.value.trim()}\"`,
-        `$FOLDERS_PATH = \"${elements.foldersPathInput.value.trim()}\"`,
-        `$NAMING_FORMAT = \"${elements.namingFormatSelect.value}\"`,
-        `$MAX_NAME_LENGTH = ${safeLength}`
+        "# 4_rename_folders_from_json.sh",
+        `export MMF_JSON_PATH=\"${elements.jsonPathInput.value.trim()}\"`,
+        `export MMF_FOLDERS_PATH=\"${elements.foldersPathInput.value.trim()}\"`,
+        `export MMF_NAMING_FORMAT=\"${elements.namingFormatSelect.value}\"`,
+        `export MMF_MAX_NAME_LENGTH=\"${safeLength}\"`,
+        "bash 4_rename_folders_from_json.sh"
     ].join("\n");
 }
 
@@ -1729,8 +1745,8 @@ elements.copyCommandsBtn.addEventListener("click", async () => {
 });
 
 elements.generatePsBtn.addEventListener("click", () => {
-    elements.psSnippet.textContent = buildPowerShellSnippet();
-    setStatus("PowerShell snippet generated. Use Run Step 3 + Step 4 to execute automatically.", "ok");
+    elements.psSnippet.textContent = buildPostProcessSnippet();
+    setStatus("Post-process snippet generated. Use Run Step 3 + Step 4 to execute automatically.", "ok");
 });
 
 if (elements.useRecommendedPathsBtn) {
@@ -1808,12 +1824,12 @@ if (elements.jsonFileSelect) {
 }
 
 elements.copyPsBtn.addEventListener("click", async () => {
-    const snippet = buildPowerShellSnippet();
+    const snippet = buildPostProcessSnippet();
     elements.psSnippet.textContent = snippet;
 
     try {
         await copyText(snippet);
-        setStatus("PowerShell snippet copied.", "ok");
+        setStatus("Post-process snippet copied.", "ok");
     } catch (err) {
         setStatus(`Copy failed: ${err.message}`, "bad");
     }

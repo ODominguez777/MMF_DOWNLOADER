@@ -56,6 +56,7 @@ NC='\033[0m' # No Color
 #
 # If you're missing cf_clearance, you'll get "enable Javascript" errors
 COOKIE="${MMF_COOKIE:-REPLACE_WITH_YOUR_ACTUAL_COOKIE_STRING}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ============================================================================
 
 # Configuration
@@ -356,10 +357,18 @@ fi
 # Check if jq is available
 JQ_CMD="jq"
 if ! command -v jq &> /dev/null; then
-    if [[ -f "./jq.exe" ]]; then
+    if [[ -f "${SCRIPT_DIR}/jq.exe" ]]; then
+        JQ_CMD="${SCRIPT_DIR}/jq.exe"
+    elif [[ -f "${SCRIPT_DIR}/jq" ]]; then
+        JQ_CMD="${SCRIPT_DIR}/jq"
+    elif [[ -f "../jq.exe" ]]; then
         JQ_CMD="../jq.exe"
-    elif [[ -f "./jq" ]]; then
+    elif [[ -f "../jq" ]]; then
         JQ_CMD="../jq"
+    elif [[ -f "./jq.exe" ]]; then
+        JQ_CMD="./jq.exe"
+    elif [[ -f "./jq" ]]; then
+        JQ_CMD="./jq"
     else
         echo -e "${RED}Error: jq not found. Download from https://github.com/stedolan/jq/releases${NC}"
         echo "Place jq or jq.exe in the same directory as this script"

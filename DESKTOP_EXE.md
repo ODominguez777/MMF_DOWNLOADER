@@ -10,7 +10,7 @@ This project includes an Electron desktop app that packages the existing scripts
    - curl
    - jq
 3. Checks optional tools:
-   - PowerShell (Windows) / pwsh (macOS)
+   - PowerShell (Windows)
    - winget (Windows) / Homebrew (macOS)
 4. Lets the user choose:
    - Install missing dependencies (via winget on Windows, brew on macOS)
@@ -27,6 +27,11 @@ The desktop dashboard now executes the real scripts with live logs:
 4. Run Step 3 (optional)
 5. Run Step 4 (optional)
 6. Stop active run
+
+Step 3 and Step 4 execution mode:
+
+- Windows: runs `3_extract_all_zips.ps1` and `4_rename_folders_from_json.ps1`
+- macOS/Linux: runs `3_extract_all_zips.sh` and `4_rename_folders_from_json.sh`
 
 The run log panel streams stdout and stderr from the process in real time.
 
@@ -92,6 +97,15 @@ Note: macOS artifacts must be built on a macOS machine.
 - Automatic install requires `winget` on Windows or `brew` on macOS.
 - If installer tooling is missing, the app allows continue without install.
 - Install commands can trigger UAC prompts depending on package and policy.
+
+## Post-processing scripts
+
+- Windows scripts:
+   - `3_extract_all_zips.ps1`
+   - `4_rename_folders_from_json.ps1`
+- Cross-platform scripts:
+   - `3_extract_all_zips.sh`
+   - `4_rename_folders_from_json.sh`
 
 ## Runtime files
 

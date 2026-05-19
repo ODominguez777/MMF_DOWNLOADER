@@ -18,10 +18,15 @@ Script 2 specifically includes:
 ✅ URL cleaning to handle Windows corruption
 ✅ jq path detection for cross-platform compatibility
 
-BONUS EXTRACTION AND RENAMING SCRIPTS FOR WINDOWS 
+BONUS EXTRACTION AND RENAMING SCRIPTS (CROSS-PLATFORM)
 
+Windows versions:
 3_extract_all_zips.ps1 - [BONUS] Windows mass extraction
 4_rename_folders_from_json.ps1 - [BONUS] Intelligent renaming
+
+macOS/Linux versions:
+3_extract_all_zips.sh - [BONUS] Cross-platform mass extraction
+4_rename_folders_from_json.sh - [BONUS] Cross-platform intelligent renaming
 
 	What Users Need to Update:
 	Extract Script (extract_all_zips.ps1):
