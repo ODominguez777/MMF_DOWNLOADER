@@ -1619,6 +1619,88 @@ function loadCategoryTaxonomy() {
     };
 }
 
+function buildCategorySelectionTagNames(rawCategorySelection) {
+    const categorySelection = sanitizeCategorySelection(rawCategorySelection);
+    if (categorySelection.length === 0) {
+        return {
+            tagNames: [],
+            taxonomyAvailable: true,
+            usedFallbackIds: false,
+            taxonomyMessage: ""
+        };
+    }
+
+    const taxonomy = loadCategoryTaxonomy();
+    const itemById = new Map();
+
+    if (taxonomy.ok && Array.isArray(taxonomy.items)) {
+        taxonomy.items.forEach((item) => {
+            if (!item || typeof item !== "object") {
+                return;
+            }
+
+            const itemId = String(item.id || "").trim();
+            if (!itemId) {
+                return;
+            }
+
+            itemById.set(itemId, item);
+        });
+    }
+
+    const tagNames = [];
+    const seen = new Set();
+    let usedFallbackIds = false;
+
+    const addTagName = (value) => {
+        const normalized = String(value || "").trim();
+        if (!normalized || seen.has(normalized)) {
+            return;
+        }
+
+        seen.add(normalized);
+        tagNames.push(normalized);
+    };
+
+    const resolveName = (id) => {
+        const item = itemById.get(id);
+        const name = item && typeof item.name === "string" ? item.name.trim() : "";
+
+        if (name) {
+            return name;
+        }
+
+        usedFallbackIds = true;
+        return id;
+    };
+
+    categorySelection.forEach((entry) => {
+        const categoryId = String(entry.id || "").trim();
+        if (!categoryId) {
+            return;
+        }
+
+        addTagName(resolveName(categoryId));
+
+        const subcategoryIds = Array.isArray(entry.subcategoryIds) ? entry.subcategoryIds : [];
+        subcategoryIds.forEach((subcategoryId) => {
+            const normalizedSubcategoryId = String(subcategoryId || "").trim();
+            if (!normalizedSubcategoryId) {
+                return;
+            }
+
+            addTagName(resolveName(normalizedSubcategoryId));
+        });
+    });
+
+    return {
+        tagNames,
+        taxonomyAvailable: taxonomy.ok,
+        usedFallbackIds,
+        taxonomyMessage: taxonomy.ok ? "" : (taxonomy.message || "")
+    };
+}
+
 async function pickDirectory(payload) {
     const options = payload && typeof payload === "object" ? payload : {};
     const title = typeof options.title === "string" && options.title.trim()
@@ -2032,6 +2114,8 @@ function buildStepPlan(stepKey, rawConfig) {
         : saved.categorySelection;
     const categorySelection = sanitizeCategorySelection(categorySelectionSource);
     const categorySelectionJson = JSON.stringify(categorySelection);
+    const categorySelectionTagNamesInfo = buildCategorySelectionTagNames(categorySelection);
+    const categorySelectionTagNamesJson = JSON.stringify(categorySelectionTagNamesInfo.tagNames);
     const namingFormatSource = config.namingFormat || saved.namingFormat;
     const namingFormat = namingFormatSource === "NAME_ONLY" ? "NAME_ONLY" : "ID_NAME";
     const maxNameLengthInput = Number.parseInt(
@@ -2142,6 +2226,11 @@ function buildStepPlan(stepKey, rawConfig) {
         if (isWindows && jqInfo.installed && jqInfo.pathInjected) {
             warnings.push("jq was detected in the WinGet package folder and injected into PATH for this run.");
         }
+        if (categorySelection.length > 0 && !categorySelectionTagNamesInfo.taxonomyAvailable) {
+            warnings.push(categorySelectionTagNamesInfo.taxonomyMessage || "Category taxonomy was unavailable. Fallback tag names may use IDs.");
+        } else if (categorySelectionTagNamesInfo.usedFallbackIds) {
+            warnings.push("Some category/subcategory fallback tag values use IDs because names were not found.");
+        }
 
         const scriptPath = path.join(scriptRoot, "mmf_download_stl_files_enhanced.sh");
         if (!ensureFileExists(scriptPath)) {
@@ -2168,6 +2257,7 @@ function buildStepPlan(stepKey, rawConfig) {
                 ...(medusaJwt ? { MMF_MEDUSA_JWT: medusaJwt } : {}),
                 ...(medusaPublishableKey ? { MMF_PUBLISHABLE_KEY: medusaPublishableKey } : {}),
                 MMF_CATEGORY_SELECTION_JSON: categorySelectionJson,
+                MMF_CATEGORY_SELECTION_TAG_NAMES_JSON: categorySelectionTagNamesJson,
                 MMF_NAMING_FORMAT: namingFormat,
                 MMF_MAX_NAME_LENGTH: String(maxNameLength),
                 PATH: processPathWithResolvedJq,

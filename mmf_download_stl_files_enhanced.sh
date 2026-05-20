@@ -523,6 +523,7 @@ write_compact_model_json() {
     local output_json="${model_dir}/model_${model_id}.json"
     local output_tmp="${output_json}.part"
     local selected_categories_json="${MMF_CATEGORY_SELECTION_JSON:-[]}"
+    local selected_category_tag_names_json="${MMF_CATEGORY_SELECTION_TAG_NAMES_JSON:-[]}"
 
     rm -f "$output_tmp"
 
@@ -534,14 +535,51 @@ write_compact_model_json() {
         selected_categories_json='[]'
     fi
 
-    if $JQ_CMD --argjson selected_categories "$selected_categories_json" '{
+    if ! printf '%s' "$selected_category_tag_names_json" | $JQ_CMD -e '. | type == "array"' >/dev/null 2>&1; then
+        selected_category_tag_names_json='[]'
+    fi
+
+    if $JQ_CMD --argjson selected_categories "$selected_categories_json" --argjson selected_category_tag_names "$selected_category_tag_names_json" '{
         name: (.name // ""),
         description: (.description // ""),
         tags: (
-            if .tags == null then []
-            elif (.tags | type) == "array" then .tags
-            else [ .tags ]
-            end
+            (
+                if .tags == null then []
+                elif (.tags | type) == "array" then .tags
+                elif (.tags | type) == "string" then
+                    if (.tags | length) == 0 then [] else [ .tags ] end
+                else
+                    [ .tags ]
+                end
+            )
+            | map(
+                if type == "string" then .
+                elif . == null then ""
+                else tostring
+                end
+            )
+            | map(gsub("^\\s+|\\s+$"; ""))
+            | map(select(length > 0))
+            | if length > 0 then
+                .
+              else
+                (
+                    if ($selected_category_tag_names | type) == "array" then
+                        $selected_category_tag_names
+                        | map(
+                            if type == "string" then .
+                            elif . == null then ""
+                            else tostring
+                            end
+                        )
+                        | map(gsub("^\\s+|\\s+$"; ""))
+                        | map(select(length > 0))
+                        | unique
+                    else
+                        []
+                    end
+                )
+              end
         ),
         price: (
             if .price == null or .price == "" then 5
