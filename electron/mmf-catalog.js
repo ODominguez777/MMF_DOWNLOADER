@@ -1,6 +1,6 @@
 const MMF_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0";
 const OBJECT_PREVIEWS_URL = "https://www.myminifactory.com/api/data-library/objectPreviews";
-const CATALOG_LOAD_MODES = ["listing", "library"];
+const CATALOG_LOAD_MODES = ["listing", "library", "creator"];
 const PREVIEW_PROCESS_CHUNK_SIZE = 400;
 
 function normalizeCatalogLoadMode(value) {
@@ -15,6 +15,14 @@ function normalizeCatalogLoadMode(value) {
     }
 
     return CATALOG_LOAD_MODES.includes(normalized) ? normalized : "library";
+}
+
+function normalizeCreatorIdFilter(value) {
+    if (value === undefined || value === null) {
+        return "";
+    }
+
+    return String(value).trim();
 }
 
 function extractMmfCustomerProfile(meJson) {
@@ -72,7 +80,19 @@ function extractCatalogItemFromPreview(preview) {
     }
 
     const name = String(preview.name || preview.title || preview.objectName || "").trim();
-    return { id, name };
+    const creatorId = preview.creatorId !== undefined && preview.creatorId !== null
+        ? String(preview.creatorId).trim()
+        : "";
+    const creatorName = String(preview.creatorName || "").trim();
+    const creatorUsername = String(preview.creatorUsername || "").trim();
+
+    return {
+        id,
+        name,
+        creatorId,
+        creatorName,
+        creatorUsername
+    };
 }
 
 function extractCatalogItemFromStoreProduct(product) {
@@ -109,7 +129,32 @@ function extractCatalogItemFromStoreProduct(product) {
     }
 
     const name = String(product.name || product.title || "").trim();
-    return { id, name };
+    const creatorId = String(
+        product.creator_id
+        ?? product.creatorId
+        ?? (product.creator && product.creator.id)
+        ?? ""
+    ).trim();
+    const creatorName = String(
+        product.creator_name
+        ?? product.creatorName
+        ?? (product.creator && (product.creator.name || product.creator.display_name))
+        ?? ""
+    ).trim();
+    const creatorUsername = String(
+        product.creator_username
+        ?? product.creatorUsername
+        ?? (product.creator && product.creator.username)
+        ?? ""
+    ).trim();
+
+    return {
+        id,
+        name,
+        creatorId,
+        creatorName,
+        creatorUsername
+    };
 }
 
 function mergeCatalogItems(targetMap, items, source) {
@@ -123,6 +168,9 @@ function mergeCatalogItems(targetMap, items, source) {
             targetMap.set(item.id, {
                 id: item.id,
                 name: item.name || "",
+                creatorId: item.creatorId || "",
+                creatorName: item.creatorName || "",
+                creatorUsername: item.creatorUsername || "",
                 sources: [source]
             });
             return;
@@ -130,6 +178,18 @@ function mergeCatalogItems(targetMap, items, source) {
 
         if (!existing.name && item.name) {
             existing.name = item.name;
+        }
+
+        if (!existing.creatorId && item.creatorId) {
+            existing.creatorId = item.creatorId;
+        }
+
+        if (!existing.creatorName && item.creatorName) {
+            existing.creatorName = item.creatorName;
+        }
+
+        if (!existing.creatorUsername && item.creatorUsername) {
+            existing.creatorUsername = item.creatorUsername;
         }
 
         if (!existing.sources.includes(source)) {
@@ -193,7 +253,7 @@ function parseObjectPreviewsPayload(json) {
     };
 }
 
-function previewMatchesLoadMode(preview, mmfId, loadMode) {
+function previewMatchesLoadMode(preview, mmfId, loadMode, creatorIdFilter) {
     if (loadMode === "library") {
         return true;
     }
@@ -201,6 +261,14 @@ function previewMatchesLoadMode(preview, mmfId, loadMode) {
     const creatorId = preview && preview.creatorId !== undefined && preview.creatorId !== null
         ? String(preview.creatorId).trim()
         : "";
+
+    if (!creatorId) {
+        return false;
+    }
+
+    if (loadMode === "creator") {
+        return Boolean(creatorIdFilter) && creatorId === creatorIdFilter;
+    }
 
     return Boolean(mmfId) && creatorId === mmfId;
 }
@@ -211,7 +279,7 @@ function yieldToEventLoop() {
     });
 }
 
-async function mergePreviewsInChunks(collected, previews, mmfId, loadMode, onProgress) {
+async function mergePreviewsInChunks(collected, previews, mmfId, loadMode, creatorIdFilter, onProgress) {
     const total = previews.length;
     if (total === 0) {
         return 0;
@@ -229,7 +297,7 @@ async function mergePreviewsInChunks(collected, previews, mmfId, loadMode, onPro
 
         for (let index = offset; index < end; index += 1) {
             const preview = previews[index];
-            if (!previewMatchesLoadMode(preview, mmfId, loadMode)) {
+            if (!previewMatchesLoadMode(preview, mmfId, loadMode, creatorIdFilter)) {
                 continue;
             }
 
@@ -271,7 +339,18 @@ async function fetchObjectPreviewsPage(requestJson, cookie, query = "", requestO
     return fetchJson(requestJson, `${OBJECT_PREVIEWS_URL}${suffix}`, cookie, {}, requestOptions);
 }
 
-async function fetchAllObjectPreviews(requestJson, cookie, mmfId, loadMode, sleep, pageDelayMs, batchSize, rateLimits, onProgress) {
+async function fetchAllObjectPreviews(
+    requestJson,
+    cookie,
+    mmfId,
+    loadMode,
+    creatorIdFilter,
+    sleep,
+    pageDelayMs,
+    batchSize,
+    rateLimits,
+    onProgress
+) {
     const collected = new Map();
     const warnings = [];
     const largeRequestOptions = {
@@ -379,11 +458,24 @@ async function fetchAllObjectPreviews(requestJson, cookie, mmfId, loadMode, slee
         message: `Parsing ${allPreviewRows.length.toLocaleString()} library entries…`
     });
 
-    const matchedRows = await mergePreviewsInChunks(collected, allPreviewRows, mmfId, loadMode, onProgress);
+    const matchedRows = await mergePreviewsInChunks(
+        collected,
+        allPreviewRows,
+        mmfId,
+        loadMode,
+        creatorIdFilter,
+        onProgress
+    );
 
     if (loadMode === "listing" && matchedRows === 0 && allPreviewRows.length > 0) {
         warnings.push(
             `No library entries matched your creator ID (${mmfId}). Use “Library” to include purchases, gifts, and tribe models.`
+        );
+    }
+
+    if (loadMode === "creator" && matchedRows === 0 && allPreviewRows.length > 0) {
+        warnings.push(
+            `No library entries matched creator ID ${creatorIdFilter}.`
         );
     }
 
@@ -498,10 +590,20 @@ async function resolveOwnCatalog({
     medusaJwt,
     medusaPublishableKey,
     catalogLoadMode,
+    creatorIdFilter,
     rateLimits,
     onProgress
 }) {
     const loadMode = normalizeCatalogLoadMode(catalogLoadMode);
+    const normalizedCreatorIdFilter = normalizeCreatorIdFilter(creatorIdFilter);
+
+    if (loadMode === "creator" && !normalizedCreatorIdFilter) {
+        return {
+            ok: false,
+            message: "Creator ID filter is required when using creator mode."
+        };
+    }
+
     const batchSize = rateLimits.catalogBatchSize || 100;
     const pageDelayMs = rateLimits.catalogPageDelayMs || 800;
 
@@ -547,6 +649,7 @@ async function resolveOwnCatalog({
         cookie,
         profile.mmfId,
         loadMode,
+        normalizedCreatorIdFilter,
         sleep,
         pageDelayMs,
         batchSize,
@@ -568,6 +671,13 @@ async function resolveOwnCatalog({
         mergeCatalogItems(merged, previewsResult.items, "objectPreviews");
         sourcesUsed.push("objectPreviews");
     } else {
+        if (loadMode === "creator") {
+            return {
+                ok: false,
+                message: `No models were found for creatorId ${normalizedCreatorIdFilter} in your data library.`
+            };
+        }
+
         return {
             ok: false,
             message: loadMode === "listing"
@@ -579,7 +689,10 @@ async function resolveOwnCatalog({
     const items = [...merged.values()]
         .map((entry) => ({
             id: entry.id,
-            name: entry.name || ""
+            name: entry.name || "",
+            creatorId: entry.creatorId || "",
+            creatorName: entry.creatorName || "",
+            creatorUsername: entry.creatorUsername || ""
         }))
         .sort((a, b) => Number(a.id) - Number(b.id));
 
@@ -587,7 +700,8 @@ async function resolveOwnCatalog({
 
     const modeLabels = {
         listing: "models you created",
-        library: "full data library"
+        library: "full data library",
+        creator: `creator filtered (${normalizedCreatorIdFilter})`
     };
 
     emitCatalogProgress(onProgress, {
@@ -601,6 +715,7 @@ async function resolveOwnCatalog({
         mmfId: profile.mmfId,
         username: profile.username,
         catalogLoadMode: loadMode,
+        creatorIdFilter: normalizedCreatorIdFilter,
         items,
         ids,
         totalCount: items.length,

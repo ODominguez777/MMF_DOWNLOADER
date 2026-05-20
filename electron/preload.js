@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld("desktopApi", {
     openPath: (payload) => ipcRenderer.invoke("desktop:open-path", payload),
     listModelJsonFiles: (payload) => ipcRenderer.invoke("desktop:list-model-json-files", payload),
     readModelJsonFile: (payload) => ipcRenderer.invoke("desktop:read-model-json-file", payload),
+    getCategoryTaxonomy: () => ipcRenderer.invoke("desktop:get-category-taxonomy"),
     loadSettings: () => ipcRenderer.invoke("desktop:load-settings"),
     saveSettings: (payload) => ipcRenderer.invoke("desktop:save-settings", payload),
     resolveOwnModelIds: (payload) => ipcRenderer.invoke("desktop:resolve-own-model-ids", payload),

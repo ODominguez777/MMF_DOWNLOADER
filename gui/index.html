@@ -124,12 +124,28 @@
                                 </span>
                             </span>
                         </label>
+                        <label class="catalog-load-card">
+                            <input type="radio" name="catalogLoadMode" value="creator">
+                            <span class="catalog-load-card-inner">
+                                <span class="catalog-load-card-radio" aria-hidden="true"></span>
+                                <span class="catalog-load-card-text">
+                                    <span class="catalog-load-card-title">Creator filter</span>
+                                    <span class="catalog-load-card-desc">Library entries filtered by a creator ID that you choose manually.</span>
+                                </span>
+                            </span>
+                        </label>
                     </div>
                 </fieldset>
 
+                <div id="creatorFilterGroup" class="creator-filter-group hidden">
+                    <label for="creatorIdFilterInput">Creator ID filter</label>
+                    <input id="creatorIdFilterInput" type="text" placeholder="e.g. 123456">
+                    <p class="hint">Used only in Creator filter mode. It matches entries by creatorId.</p>
+                </div>
+
                 <div class="model-id-list-header" aria-hidden="true">
                     <span>ID</span>
-                    <span>Model name</span>
+                    <span>Model and creator</span>
                     <span></span>
                 </div>
                 <ul id="modelIdList" class="model-id-list" aria-label="Model IDs list"></ul>
@@ -140,7 +156,14 @@
                     <span id="modelListTotalInfo" class="model-list-total-info"></span>
                 </nav>
                 <textarea id="idsInput" class="hidden" tabindex="-1" aria-hidden="true"></textarea>
-                <p class="hint catalog-load-hint">Both modes use objectPreviews. Large libraries are processed in chunks; the list shows 25 rows per page.</p>
+                <p class="hint catalog-load-hint">All modes use objectPreviews. Large libraries are processed in chunks; the list shows 25 rows per page.</p>
+
+                <details class="category-section" id="categorySectionPanel" open>
+                    <summary id="categorySelectionHeading" class="subheading">Categories and subcategories</summary>
+                    <p class="hint">Selections are saved and written to each generated model JSON with category ID and subcategory IDs.</p>
+                    <div id="categorySelectionList" class="category-selection-list" aria-live="polite"></div>
+                    <p id="categorySelectionSummary" class="hint">No categories selected.</p>
+                </details>
 
                 <label for="downloadRootInput">Download folder</label>
                 <div class="path-picker">
@@ -185,6 +208,9 @@
 
                 <h3 class="subheading">Preview (valid IDs only)</h3>
                 <pre id="idsPreview" class="preview">No valid IDs yet.</pre>
+
+                <h3 class="subheading">Selected categories summary</h3>
+                <pre id="categorySelectionPreview" class="preview">No categories selected.</pre>
             </section>
         </section>
 

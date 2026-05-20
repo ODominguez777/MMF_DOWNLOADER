@@ -64,6 +64,21 @@ TEST_MODE=false
 MAX_CONSECUTIVE_FAILURES=3  # Stop if this many downloads fail in a row
 STL_FILE_DELAY_SEC="${MMF_STL_FILE_DELAY_SEC:-5}"
 IMAGE_DELAY_SEC="${MMF_IMAGE_DELAY_SEC:-3}"
+MIN_FREE_SPACE_MB="${MMF_MIN_FREE_SPACE_MB:-2048}"
+CURL_RETRIES="${MMF_CURL_RETRIES:-2}"
+
+DOWNLOAD_LAST_CURL_EXIT=0
+DOWNLOAD_LAST_HTTP_CODE=""
+DOWNLOAD_LAST_TMP_FILE=""
+DISK_CHECK_WARNED=0
+
+if [[ ! "$MIN_FREE_SPACE_MB" =~ ^[0-9]+$ ]]; then
+    MIN_FREE_SPACE_MB=2048
+fi
+
+if [[ ! "$CURL_RETRIES" =~ ^[0-9]+$ ]]; then
+    CURL_RETRIES=2
+fi
 
 # Parse command line arguments
 if [[ "$1" == "--test" ]]; then
@@ -120,6 +135,185 @@ show_error_content() {
 get_file_size() {
     local file="$1"
     stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo "unknown"
+}
+
+get_available_kb() {
+    local probe_path="$1"
+    local check_path="$probe_path"
+
+    if [[ -z "$check_path" ]]; then
+        check_path="."
+    fi
+
+    if [[ ! -d "$check_path" ]]; then
+        check_path="$(dirname "$check_path")"
+    fi
+
+    if command -v df >/dev/null 2>&1; then
+        df -Pk "$check_path" 2>/dev/null | awk 'NR==2 {print $4}'
+        return
+    fi
+
+    echo ""
+}
+
+ensure_min_free_space() {
+    local probe_path="$1"
+    local required_mb="$2"
+    local context="$3"
+
+    if [[ "$required_mb" -le 0 ]]; then
+        return 0
+    fi
+
+    local available_kb
+    available_kb="$(get_available_kb "$probe_path")"
+
+    if [[ ! "$available_kb" =~ ^[0-9]+$ ]]; then
+        if [[ "$DISK_CHECK_WARNED" -eq 0 ]]; then
+            echo -e "${YELLOW}! Could not determine free disk space on this system. Continuing without proactive disk check.${NC}"
+            DISK_CHECK_WARNED=1
+        fi
+        return 0
+    fi
+
+    local required_kb=$((required_mb * 1024))
+    if (( available_kb < required_kb )); then
+        local available_mb=$((available_kb / 1024))
+        echo -e "${RED}Error: Low disk space (${context}).${NC}"
+        echo -e "${RED}Required free space: ${required_mb} MB, available: ${available_mb} MB.${NC}"
+        return 1
+    fi
+
+    return 0
+}
+
+abort_no_space() {
+    local context="$1"
+    echo ""
+    echo -e "${RED}=======================================================${NC}"
+    echo -e "${RED}STOPPING: No space left on device${NC}"
+    echo -e "${RED}=======================================================${NC}"
+    echo -e "${YELLOW}Context: ${context}${NC}"
+    echo "Free disk space and run the script again."
+    echo "Only validated complete files are kept; partial files are discarded."
+    exit 1
+}
+
+validate_zip_integrity() {
+    local zip_file="$1"
+
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -tqq "$zip_file" >/dev/null 2>&1
+        return $?
+    fi
+
+    if command -v zip >/dev/null 2>&1; then
+        zip -T "$zip_file" >/dev/null 2>&1
+        return $?
+    fi
+
+    # If we cannot validate archive internals, keep prior behavior.
+    return 0
+}
+
+is_valid_download_file() {
+    local file_path="$1"
+    local logical_name="$2"
+    local normalized_name=""
+
+    if [[ ! -f "$file_path" ]] || [[ ! -s "$file_path" ]]; then
+        return 1
+    fi
+
+    if is_html_error "$file_path"; then
+        return 1
+    fi
+
+    normalized_name="$(printf '%s' "$logical_name" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$normalized_name" == *.zip ]]; then
+        validate_zip_integrity "$file_path" || return 1
+    fi
+
+    return 0
+}
+
+download_file_with_guards() {
+    local download_url="$1"
+    local output_path="$2"
+    local accept_header="$3"
+    local context_label="$4"
+    local logical_name="$5"
+    local tmp_path="${output_path}.part"
+
+    DOWNLOAD_LAST_CURL_EXIT=0
+    DOWNLOAD_LAST_HTTP_CODE=""
+    DOWNLOAD_LAST_TMP_FILE="$tmp_path"
+
+    rm -f "$tmp_path"
+
+    if ! ensure_min_free_space "$output_path" "$MIN_FREE_SPACE_MB" "$context_label"; then
+        DOWNLOAD_LAST_CURL_EXIT=23
+        return 23
+    fi
+
+    DOWNLOAD_LAST_HTTP_CODE="$(curl --silent --show-error -L \
+        -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0" \
+        -H "Accept: $accept_header" \
+        -H "Cookie: $COOKIE" \
+        --compressed \
+        --retry "$CURL_RETRIES" \
+        --retry-delay 2 \
+        -w "%{http_code}" \
+        "$download_url" \
+        -o "$tmp_path")"
+    DOWNLOAD_LAST_CURL_EXIT=$?
+
+    if [[ "$DOWNLOAD_LAST_CURL_EXIT" -ne 0 ]]; then
+        if [[ "$DOWNLOAD_LAST_CURL_EXIT" -ne 23 ]]; then
+            rm -f "$tmp_path"
+            DOWNLOAD_LAST_TMP_FILE=""
+        fi
+        return "$DOWNLOAD_LAST_CURL_EXIT"
+    fi
+
+    if [[ ! "$DOWNLOAD_LAST_HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
+        rm -f "$tmp_path"
+        DOWNLOAD_LAST_TMP_FILE=""
+        return 22
+    fi
+
+    if ! is_valid_download_file "$tmp_path" "$logical_name"; then
+        return 65
+    fi
+
+    if ! mv -f "$tmp_path" "$output_path"; then
+        rm -f "$tmp_path"
+        DOWNLOAD_LAST_TMP_FILE=""
+
+        if ! ensure_min_free_space "$output_path" "$MIN_FREE_SPACE_MB" "saving ${context_label}"; then
+            DOWNLOAD_LAST_CURL_EXIT=23
+            return 23
+        fi
+
+        return 1
+    fi
+
+    DOWNLOAD_LAST_TMP_FILE=""
+    return 0
+}
+
+cleanup_orphan_part_files() {
+    local removed_count=0
+
+    while IFS= read -r -d '' part_file; do
+        rm -f "$part_file"
+        removed_count=$((removed_count + 1))
+    done < <(find . -type f -name "*.part" -print0 2>/dev/null)
+
+    if [[ "$removed_count" -gt 0 ]]; then
+        echo -e "${YELLOW}! Removed ${removed_count} orphan .part file(s) from previous interrupted runs.${NC}"
+    fi
 }
 
 sanitize_filename() {
@@ -281,16 +475,7 @@ get_model_archive_basename() {
 
 is_valid_archive_file() {
     local file_path="$1"
-
-    if [[ ! -f "$file_path" ]] || [[ ! -s "$file_path" ]]; then
-        return 1
-    fi
-
-    if is_html_error "$file_path"; then
-        return 1
-    fi
-
-    return 0
+    is_valid_download_file "$file_path" "$(basename "$file_path")"
 }
 
 find_existing_assets_archive() {
@@ -336,8 +521,20 @@ write_compact_model_json() {
     local model_dir="$2"
     local model_id="$3"
     local output_json="${model_dir}/model_${model_id}.json"
+    local output_tmp="${output_json}.part"
+    local selected_categories_json="${MMF_CATEGORY_SELECTION_JSON:-[]}"
 
-    if $JQ_CMD '{
+    rm -f "$output_tmp"
+
+    if ! ensure_min_free_space "$output_json" "$MIN_FREE_SPACE_MB" "writing compact JSON for model $model_id"; then
+        abort_no_space "writing compact JSON for model $model_id"
+    fi
+
+    if ! printf '%s' "$selected_categories_json" | $JQ_CMD -e '. | type == "array"' >/dev/null 2>&1; then
+        selected_categories_json='[]'
+    fi
+
+    if $JQ_CMD --argjson selected_categories "$selected_categories_json" '{
         name: (.name // ""),
         description: (.description // ""),
         tags: (
@@ -359,14 +556,55 @@ write_compact_model_json() {
             )
             else 5
             end
+        ),
+        categories: (
+            if ($selected_categories | type) == "array" then
+                $selected_categories
+                | map(
+                    if type == "object" then
+                        {
+                            id: (.id // "" | tostring),
+                            subcategories: (
+                                if (.subcategoryIds | type) == "array" then .subcategoryIds
+                                elif (.subcategories | type) == "array" then .subcategories
+                                else []
+                                end
+                                | map(tostring)
+                                | map(select(length > 0))
+                                | unique
+                            )
+                        }
+                    else
+                        empty
+                    end
+                )
+                | map(select(.id | length > 0))
+                | map(select(.subcategories | length > 0))
+            else
+                []
+            end
         )
-    }' "$source_json" > "$output_json"; then
+    }' "$source_json" > "$output_tmp"; then
+        if ! mv -f "$output_tmp" "$output_json"; then
+            rm -f "$output_tmp"
+            abort_no_space "saving compact JSON for model $model_id"
+        fi
         echo -e "  ${GREEN}[OK] Wrote compact JSON: model_${model_id}.json${NC}"
         return 0
     fi
 
     echo -e "  ${RED}[FAIL] Failed to build compact JSON for model $model_id${NC}"
-    printf '{"name":"","description":"","tags":[],"price":5}\n' > "$output_json"
+    rm -f "$output_tmp"
+
+    if ! printf '{"name":"","description":"","tags":[],"price":5,"categories":[]}\n' > "$output_tmp"; then
+        abort_no_space "writing fallback compact JSON for model $model_id"
+    fi
+
+    if ! mv -f "$output_tmp" "$output_json"; then
+        rm -f "$output_tmp"
+        abort_no_space "saving fallback compact JSON for model $model_id"
+    fi
+
     return 1
 }
 
@@ -418,7 +656,7 @@ download_model_images() {
         target_name=$(sanitize_filename "$target_name")
         local canonical_image_path="${images_dir}/${target_name}"
 
-        if [[ -f "$canonical_image_path" ]] && [[ -s "$canonical_image_path" ]] && ! is_html_error "$canonical_image_path"; then
+        if [[ -f "$canonical_image_path" ]] && is_valid_download_file "$canonical_image_path" "$target_name"; then
             local existing_image_size
             existing_image_size=$(get_file_size "$canonical_image_path")
             echo -e "  ${GREEN}[SKIP] Image already downloaded: $(basename "$canonical_image_path") (${existing_image_size} bytes)${NC}"
@@ -427,6 +665,7 @@ download_model_images() {
         fi
 
         if [[ -e "$canonical_image_path" ]]; then
+            echo -e "  ${YELLOW}! Removing invalid existing image file: $(basename "$canonical_image_path")${NC}"
             rm -f "$canonical_image_path"
         fi
 
@@ -435,26 +674,28 @@ download_model_images() {
 
         echo -e "  ${YELLOW}Downloading image: $(basename "$output_path")${NC}"
 
-        curl --silent -L \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0" \
-            -H "Accept: image/*,*/*;q=0.8" \
-            -H "Cookie: $COOKIE" \
-            --compressed \
-            "$image_url" \
-            -o "$output_path"
-
-        if [[ -f "$output_path" ]] && [[ -s "$output_path" ]]; then
-            if is_html_error "$output_path"; then
-                echo -e "  ${RED}[FAIL] Failed image download: received HTML error page${NC}"
-                rm -f "$output_path"
-            else
-                local image_size
-                image_size=$(get_file_size "$output_path")
-                echo -e "  ${GREEN}[OK] Downloaded image $(basename "$output_path") (${image_size} bytes)${NC}"
-                successful_downloads=$((successful_downloads + 1))
-            fi
+        if download_file_with_guards "$image_url" "$output_path" "image/*,*/*;q=0.8" "downloading image $(basename "$output_path")" "$(basename "$output_path")"; then
+            local image_size
+            image_size=$(get_file_size "$output_path")
+            echo -e "  ${GREEN}[OK] Downloaded image $(basename "$output_path") (${image_size} bytes)${NC}"
+            successful_downloads=$((successful_downloads + 1))
         else
-            echo -e "  ${RED}[FAIL] Failed to download image $(basename "$output_path")${NC}"
+            if [[ "$DOWNLOAD_LAST_CURL_EXIT" -eq 23 ]]; then
+                rm -f "$output_path" "${output_path}.part"
+                abort_no_space "downloading image $(basename "$output_path")"
+            fi
+
+            if [[ -n "$DOWNLOAD_LAST_TMP_FILE" ]] && [[ -f "$DOWNLOAD_LAST_TMP_FILE" ]]; then
+                if is_html_error "$DOWNLOAD_LAST_TMP_FILE"; then
+                    echo -e "  ${RED}[FAIL] Failed image download: received HTML error page${NC}"
+                else
+                    echo -e "  ${RED}[FAIL] Failed image validation for $(basename "$output_path")${NC}"
+                fi
+                rm -f "$DOWNLOAD_LAST_TMP_FILE"
+            else
+                echo -e "  ${RED}[FAIL] Failed to download image $(basename "$output_path") (curl exit ${DOWNLOAD_LAST_CURL_EXIT}, HTTP ${DOWNLOAD_LAST_HTTP_CODE:-unknown})${NC}"
+            fi
+
             rm -f "$output_path"
         fi
 
@@ -495,18 +736,34 @@ compress_non_json_assets() {
         return 0
     fi
 
+    if ! ensure_min_free_space "$model_dir" "$MIN_FREE_SPACE_MB" "creating ZIP archive for model $model_id"; then
+        abort_no_space "creating ZIP archive for model $model_id"
+    fi
+
     rm -f "$archive_path"
+    local compression_exit=0
 
     if command -v zip >/dev/null 2>&1; then
         (cd "$model_dir" && zip -q "$archive_name" "${files_to_zip[@]}")
+        compression_exit=$?
     elif command -v tar >/dev/null 2>&1; then
         (cd "$model_dir" && tar -a -cf "$archive_name" "${files_to_zip[@]}")
+        compression_exit=$?
     else
         echo -e "  ${RED}[FAIL] Could not compress files: zip/tar not found${NC}"
         return 1
     fi
 
-    if [[ -f "$archive_path" ]] && [[ -s "$archive_path" ]]; then
+    if [[ "$compression_exit" -ne 0 ]]; then
+        rm -f "$archive_path"
+        if ! ensure_min_free_space "$model_dir" "$MIN_FREE_SPACE_MB" "creating ZIP archive for model $model_id"; then
+            abort_no_space "creating ZIP archive for model $model_id"
+        fi
+        echo -e "  ${RED}[FAIL] Failed to create $(basename "$archive_path")${NC}"
+        return 1
+    fi
+
+    if is_valid_archive_file "$archive_path"; then
         for file_name in "${files_to_zip[@]}"; do
             rm -f "${model_dir}/${file_name}"
         done
@@ -514,6 +771,12 @@ compress_non_json_assets() {
         zip_size=$(get_file_size "$archive_path")
         echo -e "  ${GREEN}[OK] Created $(basename "$archive_path") (${zip_size} bytes)${NC}"
         return 0
+    fi
+
+    rm -f "$archive_path"
+
+    if ! ensure_min_free_space "$model_dir" "$MIN_FREE_SPACE_MB" "verifying ZIP archive for model $model_id"; then
+        abort_no_space "creating ZIP archive for model $model_id"
     fi
 
     echo -e "  ${RED}[FAIL] Failed to create $(basename "$archive_path")${NC}"
@@ -563,6 +826,7 @@ fi
 # Create STL downloads directory
 mkdir -p stl_files
 cd stl_files || exit
+cleanup_orphan_part_files
 
 # Count JSON files
 json_count=$(find .. -name "model_*.json" -type f 2>/dev/null | wc -l)
@@ -574,6 +838,11 @@ fi
 
 echo -e "${BLUE}Found $json_count JSON files to process${NC}"
 echo -e "${BLUE}Output folders: $FOLDER_NAMING_FORMAT (readable names; legacy model_<id> still supported)${NC}"
+echo -e "${CYAN}Minimum free space required before each write: ${MIN_FREE_SPACE_MB} MB${NC}"
+
+if ! ensure_min_free_space "." "$MIN_FREE_SPACE_MB" "before starting download loop"; then
+    abort_no_space "before starting download loop"
+fi
 
 # TEST MODE - Download just one file to verify everything works
 if [[ "$TEST_MODE" == true ]]; then
@@ -602,22 +871,31 @@ if [[ "$TEST_MODE" == true ]]; then
             echo -e "  Downloading: ${CYAN}$filename${NC}"
             
             test_file="test_download_${model_id}.tmp"
-            
-            curl --silent -L \
-                -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0" \
-                -H "Accept: application/octet-stream" \
-                -H "Cookie: $COOKIE" \
-                --compressed \
-                "$download_url" \
-                -o "$test_file"
-            
+
             echo ""
-            
-            if is_html_error "$test_file"; then
+
+            if download_file_with_guards "$download_url" "$test_file" "application/octet-stream" "running test mode download" "$(basename "$test_file")"; then
+                file_size=$(get_file_size "$test_file")
+                echo -e "${GREEN}[OK] TEST PASSED${NC}"
+                echo -e "  Successfully downloaded ${CYAN}$filename${NC} (${file_size} bytes)"
+                echo "  File appears to be valid (not an error page)"
+                echo ""
+                echo -e "${GREEN}Cookie is working! You can now run the full download:${NC}"
+                echo "  bash $(basename "$0")"
+                rm -f "$test_file"
+                exit 0
+            fi
+
+            if [[ "$DOWNLOAD_LAST_CURL_EXIT" -eq 23 ]]; then
+                rm -f "$test_file" "${test_file}.part"
+                abort_no_space "running test mode download"
+            fi
+
+            if [[ -n "$DOWNLOAD_LAST_TMP_FILE" ]] && [[ -f "$DOWNLOAD_LAST_TMP_FILE" ]] && is_html_error "$DOWNLOAD_LAST_TMP_FILE"; then
                 echo -e "${RED}[FAIL] TEST FAILED${NC}"
                 echo -e "${RED}Downloaded file is an HTML error page, not the actual file${NC}"
                 echo ""
-                show_error_content "$test_file"
+                show_error_content "$DOWNLOAD_LAST_TMP_FILE"
                 echo ""
                 echo -e "${YELLOW}Common causes:${NC}"
                 echo "  1. Cookie expired - get a fresh cookie from browser"
@@ -631,19 +909,14 @@ if [[ "$TEST_MODE" == true ]]; then
                 echo "  3. F12 -> Network -> Find 'download' request"
                 echo "  4. Copy the Cookie header value"
                 echo "  5. Paste into script (no extra quotes)"
-                rm -f "$test_file"
-                exit 1
             else
-                file_size=$(stat -c%s "$test_file" 2>/dev/null || stat -f%z "$test_file" 2>/dev/null || echo "unknown")
-                echo -e "${GREEN}[OK] TEST PASSED${NC}"
-                echo -e "  Successfully downloaded ${CYAN}$filename${NC} (${file_size} bytes)"
-                echo "  File appears to be valid (not an error page)"
-                echo ""
-                echo -e "${GREEN}Cookie is working! You can now run the full download:${NC}"
-                echo "  bash $(basename "$0")"
-                rm -f "$test_file"
-                exit 0
+                echo -e "${RED}[FAIL] TEST FAILED${NC}"
+                echo -e "${RED}Download failed (curl exit ${DOWNLOAD_LAST_CURL_EXIT}, HTTP ${DOWNLOAD_LAST_HTTP_CODE:-unknown})${NC}"
+                echo "Check cookie validity and your network connection."
             fi
+
+            rm -f "$test_file" "${test_file}.part" "$DOWNLOAD_LAST_TMP_FILE"
+            exit 1
         else
             is_bought=$($JQ_CMD -r '.is_bought // "unknown"' "$json_file" 2>/dev/null)
             if [[ "$is_bought" == "false" ]]; then
@@ -747,7 +1020,7 @@ for json_file in ../model_*.json; do
 
             canonical_output="${model_dir}/${filename}"
 
-            if [[ -f "$canonical_output" ]] && [[ -s "$canonical_output" ]] && ! is_html_error "$canonical_output"; then
+            if [[ -f "$canonical_output" ]] && is_valid_download_file "$canonical_output" "$filename"; then
                 file_size=$(get_file_size "$canonical_output")
                 echo -e "  ${GREEN}[SKIP] Already downloaded: $(basename "$canonical_output") (${file_size} bytes)${NC}"
                 successful_downloads=$((successful_downloads + 1))
@@ -757,6 +1030,7 @@ for json_file in ../model_*.json; do
             fi
 
             if [[ -e "$canonical_output" ]]; then
+                echo -e "  ${YELLOW}! Removing invalid existing file: $(basename "$canonical_output")${NC}"
                 rm -f "$canonical_output"
             fi
 
@@ -766,64 +1040,57 @@ for json_file in ../model_*.json; do
 
             echo -e "  ${YELLOW}Downloading file: $(basename "$output_file")${NC}"
 
-            curl --silent -L \
-                -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0" \
-                -H "Accept: application/octet-stream" \
-                -H "Cookie: $COOKIE" \
-                --compressed \
-                "$download_url" \
-                -o "$output_file"
-
-            if [[ -f "$output_file" ]] && [[ -s "$output_file" ]]; then
-                if is_html_error "$output_file"; then
-                    echo -e "  ${RED}[FAIL] Failed: Downloaded HTML error page instead of file${NC}"
-                    consecutive_failures=$((consecutive_failures + 1))
-
-                    if [[ $consecutive_failures -eq 1 ]]; then
-                        show_error_content "$output_file"
-                    fi
-
-                    rm -f "$output_file"
-
-                    if [[ $consecutive_failures -ge $MAX_CONSECUTIVE_FAILURES ]]; then
-                        echo ""
-                        echo -e "${RED}=======================================================${NC}"
-                        echo -e "${RED}STOPPING: $MAX_CONSECUTIVE_FAILURES consecutive failures detected${NC}"
-                        echo -e "${RED}=======================================================${NC}"
-                        echo ""
-                        echo -e "${YELLOW}This indicates a systematic problem (not random failures)${NC}"
-                        echo ""
-                        echo -e "${CYAN}Most likely causes:${NC}"
-                        echo "  1. Cookie expired - get fresh cookie from browser"
-                        echo "  2. Missing cf_clearance token in cookie"
-                        echo "  3. Session logged out - log back into MyMiniFactory"
-                        echo "  4. Account permissions issue"
-                        echo ""
-                        echo -e "${CYAN}To fix:${NC}"
-                        echo "  1. Log into MyMiniFactory in your browser"
-                        echo "  2. Download a file manually to verify access"
-                        echo "  3. Copy fresh cookie from that download request (F12 -> Network)"
-                        echo "  4. Update COOKIE variable in script"
-                        echo "  5. Run in test mode first: bash $(basename "$0") --test"
-                        echo ""
-                        exit 1
-                    fi
-                else
-                    file_size=$(get_file_size "$output_file")
-                    echo -e "  ${GREEN}[OK] Downloaded $(basename "$output_file") (${file_size} bytes)${NC}"
-                    successful_downloads=$((successful_downloads + 1))
-                    model_file_successful_downloads=$((model_file_successful_downloads + 1))
-                    consecutive_failures=0
-                fi
+            if download_file_with_guards "$download_url" "$output_file" "application/octet-stream" "downloading file $(basename "$output_file")" "$(basename "$output_file")"; then
+                file_size=$(get_file_size "$output_file")
+                echo -e "  ${GREEN}[OK] Downloaded $(basename "$output_file") (${file_size} bytes)${NC}"
+                successful_downloads=$((successful_downloads + 1))
+                model_file_successful_downloads=$((model_file_successful_downloads + 1))
+                consecutive_failures=0
             else
-                echo -e "  ${RED}[FAIL] Failed to download $(basename "$output_file")${NC}"
+                if [[ "$DOWNLOAD_LAST_CURL_EXIT" -eq 23 ]]; then
+                    rm -f "$output_file" "${output_file}.part" "$DOWNLOAD_LAST_TMP_FILE"
+                    abort_no_space "downloading file $(basename "$output_file")"
+                fi
+
+                if [[ -n "$DOWNLOAD_LAST_TMP_FILE" ]] && [[ -f "$DOWNLOAD_LAST_TMP_FILE" ]]; then
+                    if is_html_error "$DOWNLOAD_LAST_TMP_FILE"; then
+                        echo -e "  ${RED}[FAIL] Failed: Downloaded HTML error page instead of file${NC}"
+
+                        if [[ $consecutive_failures -eq 0 ]]; then
+                            show_error_content "$DOWNLOAD_LAST_TMP_FILE"
+                        fi
+                    else
+                        echo -e "  ${RED}[FAIL] Failed validation for $(basename "$output_file")${NC}"
+                    fi
+
+                    rm -f "$DOWNLOAD_LAST_TMP_FILE"
+                else
+                    echo -e "  ${RED}[FAIL] Failed to download $(basename "$output_file") (curl exit ${DOWNLOAD_LAST_CURL_EXIT}, HTTP ${DOWNLOAD_LAST_HTTP_CODE:-unknown})${NC}"
+                fi
+
                 consecutive_failures=$((consecutive_failures + 1))
-                rm -f "$output_file"
+                rm -f "$output_file" "${output_file}.part"
 
                 if [[ $consecutive_failures -ge $MAX_CONSECUTIVE_FAILURES ]]; then
                     echo ""
-                    echo -e "${RED}STOPPING: Too many consecutive failures${NC}"
-                    echo "Check your internet connection and cookie validity"
+                    echo -e "${RED}=======================================================${NC}"
+                    echo -e "${RED}STOPPING: $MAX_CONSECUTIVE_FAILURES consecutive failures detected${NC}"
+                    echo -e "${RED}=======================================================${NC}"
+                    echo ""
+                    echo -e "${YELLOW}This indicates a systematic problem (not random failures)${NC}"
+                    echo ""
+                    echo -e "${CYAN}Most likely causes:${NC}"
+                    echo "  1. Cookie expired - get fresh cookie from browser"
+                    echo "  2. Missing cf_clearance token in cookie"
+                    echo "  3. Session logged out - log back into MyMiniFactory"
+                    echo "  4. Account permissions issue"
+                    echo ""
+                    echo -e "${CYAN}To fix:${NC}"
+                    echo "  1. Log into MyMiniFactory in your browser"
+                    echo "  2. Download a file manually to verify access"
+                    echo "  3. Copy fresh cookie from that download request (F12 -> Network)"
+                    echo "  4. Update COOKIE variable in script"
+                    echo "  5. Run in test mode first: bash $(basename "$0") --test"
                     exit 1
                 fi
             fi

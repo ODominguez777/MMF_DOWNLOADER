@@ -1,0 +1,262 @@
+[
+  {
+    "id": "5886d057-f8e9-4c7c-981d-02c220603b57",
+    "name": "Wargaming",
+    "slug": "wargaming",
+    "description": "3D miniatures and vehicles for tabletop battles. Includes trenches, fantasy, sci-fi, historical, and vehicles.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:08:15.458+00:00",
+    "parent_id": null
+  },
+  {
+    "id": "88665d26-45f4-460b-893c-5e168df8ba13",
+    "name": "RPG",
+    "slug": "rpg",
+    "description": "Heroes, monsters, NPCs, and mounts for role-playing games. Covers player characters, monsters & bosses, familiars, and vehicles",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:09:55.698+00:00",
+    "parent_id": null
+  },
+  {
+    "id": "3d3cb9c8-26dc-4aef-b0a3-325a284d0a3b",
+    "name": "Terrain",
+    "slug": "terrain",
+    "description": "3D landscapes and environments for boards or dioramas. Includes dungeons, wilderness, urban areas, and sci-fi/starships.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:11:46.613+00:00",
+    "parent_id": null
+  },
+  {
+    "id": "6de96c67-32c3-4de3-b036-eb03dfecf1be",
+    "name": "Bases",
+    "slug": "bases",
+    "description": "Platforms and display pegs for miniatures. Features round/oval, square/rectangular, and scenic toppers.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:12:15.852+00:00",
+    "parent_id": null
+  },
+  {
+    "id": "8a11b50c-003c-4822-96ae-48a4a5d62873",
+    "name": "Bits and Modkits",
+    "slug": "bits-and-modkits",
+    "description": "Custom parts and accessories to modify miniatures. Includes weapons, helmets, effects, and modular pieces.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:12:55.792+00:00",
+    "parent_id": null
+  },
+  {
+    "id": "4bde41d4-a486-4c04-9fa5-f66eee0ff81a",
+    "name": "Trench",
+    "slug": "trench",
+    "description": "3D models of trenches, fortifications, and battlefield defenses for tabletop wargames.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:16:03.155+00:00",
+    "parent_id": "5886d057-f8e9-4c7c-981d-02c220603b57"
+  },
+  {
+    "id": "3ed708bc-4f71-4865-a88f-5895adac9adf",
+    "name": "Fantasy",
+    "slug": "fantasy",
+    "description": "Fantasy-themed miniatures including warriors, creatures, and scenery for wargames.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:16:22.034+00:00",
+    "parent_id": "5886d057-f8e9-4c7c-981d-02c220603b57"
+  },
+  {
+    "id": "d6fa67a1-4e61-489d-86d5-8c019d3518af",
+    "name": "Sci-Fi",
+    "slug": "sci-fi",
+    "description": "Futuristic miniatures, vehicles, and battle units for science fiction wargames.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:16:34.504+00:00",
+    "parent_id": "5886d057-f8e9-4c7c-981d-02c220603b57"
+  },
+  {
+    "id": "5b3af9d3-71a0-47d3-96a6-7a15bd557028",
+    "name": "Historical",
+    "slug": "historical",
+    "description": "3D models based on real-world armies, weapons, and vehicles from historical eras.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:16:48.85+00:00",
+    "parent_id": "5886d057-f8e9-4c7c-981d-02c220603b57"
+  },
+  {
+    "id": "578c9af1-a5ad-4b0f-92fd-7fe1e6c3a8ba",
+    "name": "Vehicles",
+    "slug": "vehicles",
+    "description": "Tanks, mechs, and other 3D vehicles designed for tabletop wargaming.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:17:00.917+00:00",
+    "parent_id": "5886d057-f8e9-4c7c-981d-02c220603b57"
+  },
+  {
+    "id": "f552fb6d-6d60-4d40-851d-2cc0a360763c",
+    "name": "Player Characters",
+    "slug": "player-characters",
+    "description": "3D printable heroes and adventurers for tabletop RPG campaigns.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:17:25.642+00:00",
+    "parent_id": "88665d26-45f4-460b-893c-5e168df8ba13"
+  },
+  {
+    "id": "d53a1faf-36ed-4a68-a38a-aea178c85ada",
+    "name": "NPCs",
+    "slug": "npcs",
+    "description": "Non-player character miniatures to enrich RPG sessions and encounters.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:17:38.558+00:00",
+    "parent_id": "88665d26-45f4-460b-893c-5e168df8ba13"
+  },
+  {
+    "id": "82b0cee3-1898-4c6e-914a-2fb9149ac00d",
+    "name": "Monsters and Bosses",
+    "slug": "monsters-and-bosses",
+    "description": "Detailed 3D monsters and boss creatures for epic RPG battles.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:17:50.249+00:00",
+    "parent_id": "88665d26-45f4-460b-893c-5e168df8ba13"
+  },
+  {
+    "id": "7e303dcf-6675-4457-a1a3-05630f1fc103",
+    "name": "Familiars and Summons",
+    "slug": "familiars-and-summons",
+    "description": "3D miniatures of pets, spirits, and summoned creatures for RPG games.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:18:02.601+00:00",
+    "parent_id": "88665d26-45f4-460b-893c-5e168df8ba13"
+  },
+  {
+    "id": "9629c231-98f5-4a1e-af9a-8c09fb4d3851",
+    "name": "Mounts and Vehicles",
+    "slug": "mounts-and-vehicles",
+    "description": "Creatures and transport models for RPG heroes and campaigns.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:18:22.339+00:00",
+    "parent_id": "88665d26-45f4-460b-893c-5e168df8ba13"
+  },
+  {
+    "id": "37e08ce4-8b00-46fb-ad0f-a7bded045580",
+    "name": "Dungeons and Interiors",
+    "slug": "dungeons-and-interiors",
+    "description": "3D printable rooms, corridors, and furniture for dungeon setups.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:18:45.333+00:00",
+    "parent_id": "3d3cb9c8-26dc-4aef-b0a3-325a284d0a3b"
+  },
+  {
+    "id": "924372dd-7fec-4852-9f28-8c5e461f10c7",
+    "name": "Wilderness and Ruins",
+    "slug": "wilderness-and-ruins",
+    "description": "Natural landscapes, ruins, and outdoor terrain for immersive scenes.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:18:56.717+00:00",
+    "parent_id": "3d3cb9c8-26dc-4aef-b0a3-325a284d0a3b"
+  },
+  {
+    "id": "4c5f55fc-3604-4ef7-ad2d-77be9904ad86",
+    "name": "Urban and Industrial",
+    "slug": "urban-and-industrial",
+    "description": "3D cityscapes, factories, and urban environments for tabletop terrain.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:19:14.055+00:00",
+    "parent_id": "3d3cb9c8-26dc-4aef-b0a3-325a284d0a3b"
+  },
+  {
+    "id": "f0aad77c-eaea-49e1-ab5b-5acc10747fbc",
+    "name": "Sci Fi and Starships",
+    "slug": "sci-fi-and-starships",
+    "description": "Spaceships, bases, and futuristic structures for sci-fi settings.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:19:43.471+00:00",
+    "parent_id": "3d3cb9c8-26dc-4aef-b0a3-325a284d0a3b"
+  },
+  {
+    "id": "c34cd10a-994d-492c-a3f5-0a00527f194b",
+    "name": "Round and Oval",
+    "slug": "round-and-oval",
+    "description": "3D round and oval bases for displaying tabletop miniatures.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:20:06.45+00:00",
+    "parent_id": "6de96c67-32c3-4de3-b036-eb03dfecf1be"
+  },
+  {
+    "id": "f718a742-6535-401c-90a8-907949277dcf",
+    "name": "Square and Rectangular",
+    "slug": "square-and-rectangular",
+    "description": "Square and rectangular base models for miniatures and wargaming units.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:20:16.962+00:00",
+    "parent_id": "6de96c67-32c3-4de3-b036-eb03dfecf1be"
+  },
+  {
+    "id": "bed900b1-2507-41a1-a587-bbdeacca3d38",
+    "name": "Scenic Toppers",
+    "slug": "scenic-toppers",
+    "description": "Decorative 3D toppers to enhance miniature bases and scenes.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:20:32.238+00:00",
+    "parent_id": "6de96c67-32c3-4de3-b036-eb03dfecf1be"
+  },
+  {
+    "id": "b94ac6c8-5bff-4dd5-a35d-9aa5c9f12506",
+    "name": "Weapons and Arms",
+    "slug": "weapons-and-arms",
+    "description": "3D weapons and arm components for miniature customization.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:20:44.032+00:00",
+    "parent_id": "8a11b50c-003c-4822-96ae-48a4a5d62873"
+  },
+  {
+    "id": "9706cba4-de10-4898-ac67-ded10e40cd71",
+    "name": "Heads and Helmets",
+    "slug": "heads-and-helmets",
+    "description": "Alternative heads and helmets to modify miniatures.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:20:59.483+00:00",
+    "parent_id": "8a11b50c-003c-4822-96ae-48a4a5d62873"
+  },
+  {
+    "id": "8189c6ca-5fb8-437e-8740-6a081077d251",
+    "name": "Accessories and Effects",
+    "slug": "accessories-and-effects",
+    "description": "Extra 3D accessories, effects, and props for detailed builds.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:21:11.946+00:00",
+    "parent_id": "8a11b50c-003c-4822-96ae-48a4a5d62873"
+  },
+  {
+    "id": "37cd9336-44da-4631-aae5-52dfa9e9881c",
+    "name": "Modular Parts",
+    "slug": "modular-parts",
+    "description": "Modular 3D pieces and kits for converting and assembling miniatures.",
+    "icon_url": null,
+    "is_active": true,
+    "created_at": "2025-10-24T20:21:23.864+00:00",
+    "parent_id": "8a11b50c-003c-4822-96ae-48a4a5d62873"
+  }
+]

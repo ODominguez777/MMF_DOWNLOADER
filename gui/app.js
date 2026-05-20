@@ -21,6 +21,11 @@ const elements = {
     captureMmfSessionBtn: document.getElementById("captureMmfSessionBtn"),
     checkSessionBtn: document.getElementById("checkSessionBtn"),
     sessionStatus: document.getElementById("sessionStatus"),
+    creatorFilterGroup: document.getElementById("creatorFilterGroup"),
+    creatorIdFilterInput: document.getElementById("creatorIdFilterInput"),
+    categorySelectionList: document.getElementById("categorySelectionList"),
+    categorySelectionSummary: document.getElementById("categorySelectionSummary"),
+    categorySelectionPreview: document.getElementById("categorySelectionPreview"),
     idsInput: document.getElementById("idsInput"),
     downloadRootInput: document.getElementById("downloadRootInput"),
     browseDownloadRootBtn: document.getElementById("browseDownloadRootBtn"),
@@ -93,8 +98,10 @@ let settingsApplyInProgress = false;
 let pipelineRunning = false;
 let runtimeInfoCache = null;
 let modelIdEntries = [];
+let categoryTaxonomyItems = [];
+let categorySelectionMap = new Map();
 const MODEL_LIST_UI_PAGE_SIZE = 25;
-const CATALOG_LOAD_MODES = ["listing", "library"];
+const CATALOG_LOAD_MODES = ["listing", "library", "creator"];
 let modelListUiPage = 1;
 
 function getCatalogLoadModeInputs() {
@@ -125,21 +132,390 @@ function setCatalogLoadMode(mode) {
     getCatalogLoadModeInputs().forEach((input) => {
         input.checked = input.value === normalized;
     });
+    updateCreatorFilterVisibility();
 }
 
 function getCatalogLoadModeLabel(mode) {
     const labels = {
         listing: "listing (models you created)",
-        library: "library (all your models)"
+        library: "library (all your models)",
+        creator: "creator filter"
     };
 
     return labels[normalizeCatalogLoadModeValue(mode)] || mode;
 }
 
+function normalizeCreatorIdFilterValue(value) {
+    if (value === undefined || value === null) {
+        return "";
+    }
+
+    return String(value).trim();
+}
+
+function getCreatorIdFilter() {
+    return normalizeCreatorIdFilterValue(elements.creatorIdFilterInput ? elements.creatorIdFilterInput.value : "");
+}
+
+function setCreatorIdFilter(value) {
+    if (!elements.creatorIdFilterInput) {
+        return;
+    }
+
+    elements.creatorIdFilterInput.value = normalizeCreatorIdFilterValue(value);
+}
+
+function updateCreatorFilterVisibility() {
+    if (!elements.creatorFilterGroup) {
+        return;
+    }
+
+    const showCreatorFilter = getCatalogLoadMode() === "creator";
+    elements.creatorFilterGroup.classList.toggle("hidden", !showCreatorFilter);
+}
+
+function normalizeCategoryTaxonomy(rawItems) {
+    if (!Array.isArray(rawItems)) {
+        return [];
+    }
+
+    const seen = new Set();
+    const normalizedItems = [];
+
+    rawItems.forEach((entry) => {
+        if (!entry || typeof entry !== "object") {
+            return;
+        }
+
+        const id = String(entry.id || "").trim();
+        if (!id || seen.has(id)) {
+            return;
+        }
+
+        seen.add(id);
+        normalizedItems.push({
+            id,
+            name: typeof entry.name === "string" ? entry.name.trim() : "",
+            parent_id: entry.parent_id === null || entry.parent_id === undefined
+                ? null
+                : String(entry.parent_id).trim() || null,
+            is_active: entry.is_active !== false
+        });
+    });
+
+    return normalizedItems;
+}
+
+function buildCategoryTree(items) {
+    const byId = new Map();
+    const roots = [];
+
+    items.forEach((item) => {
+        byId.set(item.id, {
+            ...item,
+            subcategories: []
+        });
+    });
+
+    byId.forEach((item) => {
+        if (!item.parent_id) {
+            roots.push(item);
+            return;
+        }
+
+        const parent = byId.get(item.parent_id);
+        if (parent) {
+            parent.subcategories.push(item);
+        }
+    });
+
+    roots.forEach((root) => {
+        root.subcategories.sort((a, b) => a.name.localeCompare(b.name));
+    });
+
+    roots.sort((a, b) => a.name.localeCompare(b.name));
+    return roots;
+}
+
+function normalizeCategorySelection(rawSelection) {
+    if (!Array.isArray(rawSelection)) {
+        return [];
+    }
+
+    const merged = new Map();
+
+    rawSelection.forEach((entry) => {
+        if (!entry || typeof entry !== "object") {
+            return;
+        }
+
+        const categoryId = String(entry.id || "").trim();
+        if (!categoryId) {
+            return;
+        }
+
+        const rawSubcategories = Array.isArray(entry.subcategoryIds)
+            ? entry.subcategoryIds
+            : Array.isArray(entry.subcategories)
+                ? entry.subcategories
+                : [];
+
+        const normalizedSubs = rawSubcategories
+            .map((subcategoryId) => String(subcategoryId || "").trim())
+            .filter(Boolean);
+
+        const existing = merged.get(categoryId) || new Set();
+        normalizedSubs.forEach((subcategoryId) => existing.add(subcategoryId));
+        merged.set(categoryId, existing);
+    });
+
+    return [...merged.entries()]
+        .map(([id, subcategorySet]) => ({
+            id,
+            subcategoryIds: [...subcategorySet]
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function setCategorySelectionMapFromArray(rawSelection) {
+    const normalized = normalizeCategorySelection(rawSelection);
+    const tree = buildCategoryTree(categoryTaxonomyItems);
+    const validCategories = new Map(tree.map((category) => [
+        category.id,
+        new Set(category.subcategories.map((subcategory) => subcategory.id))
+    ]));
+
+    categorySelectionMap = new Map();
+
+    normalized.forEach((entry) => {
+        const allowedSubcategories = validCategories.get(entry.id);
+        if (!allowedSubcategories) {
+            return;
+        }
+
+        const subcategorySet = new Set(
+            entry.subcategoryIds.filter((subcategoryId) => allowedSubcategories.has(subcategoryId))
+        );
+
+        categorySelectionMap.set(entry.id, subcategorySet);
+    });
+}
+
+function getCategorySelectionSnapshot() {
+    return [...categorySelectionMap.entries()]
+        .map(([id, subcategories]) => ({
+            id,
+            subcategoryIds: [...subcategories]
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function getCategorySelectionValidation() {
+    const tree = buildCategoryTree(categoryTaxonomyItems);
+    const categoryMap = new Map(tree.map((category) => [category.id, category]));
+
+    const selectedCategories = [...categorySelectionMap.keys()].filter((categoryId) => categoryMap.has(categoryId));
+    const categoriesWithoutSubcategories = selectedCategories.filter((categoryId) => {
+        const subcategories = categorySelectionMap.get(categoryId);
+        return !subcategories || subcategories.size === 0;
+    });
+
+    let selectedSubcategoryCount = 0;
+    selectedCategories.forEach((categoryId) => {
+        const subcategories = categorySelectionMap.get(categoryId);
+        selectedSubcategoryCount += subcategories ? subcategories.size : 0;
+    });
+
+    return {
+        selectedCategoryCount: selectedCategories.length,
+        selectedSubcategoryCount,
+        categoriesWithoutSubcategories,
+        isValid: categoriesWithoutSubcategories.length === 0,
+        hasSelection: selectedCategories.length > 0
+    };
+}
+
+function updateCategorySelectionSummary() {
+    updateCategorySelectionPreview();
+
+    if (!elements.categorySelectionSummary) {
+        return;
+    }
+
+    const validation = getCategorySelectionValidation();
+
+    if (!validation.hasSelection) {
+        elements.categorySelectionSummary.textContent = "No categories selected.";
+        return;
+    }
+
+    if (!validation.isValid) {
+        elements.categorySelectionSummary.textContent = `${validation.categoriesWithoutSubcategories.length} selected category(ies) need at least one subcategory.`;
+        return;
+    }
+
+    elements.categorySelectionSummary.textContent = `${validation.selectedCategoryCount} categories and ${validation.selectedSubcategoryCount} subcategories selected.`;
+}
+
+function buildCategorySelectionPreviewText() {
+    const snapshot = getCategorySelectionSnapshot();
+    if (snapshot.length === 0) {
+        return "No categories selected.";
+    }
+
+    const tree = buildCategoryTree(categoryTaxonomyItems);
+    const categoryMap = new Map();
+    const subcategoryMapByCategory = new Map();
+
+    tree.forEach((category) => {
+        categoryMap.set(category.id, category);
+
+        const subcategoryMap = new Map();
+        category.subcategories.forEach((subcategory) => {
+            subcategoryMap.set(subcategory.id, subcategory);
+        });
+        subcategoryMapByCategory.set(category.id, subcategoryMap);
+    });
+
+    let totalSubcategories = 0;
+    const lines = [];
+
+    snapshot.forEach((entry) => {
+        const category = categoryMap.get(entry.id);
+        const categoryName = category && category.name ? category.name : entry.id;
+        const subcategoryIds = Array.isArray(entry.subcategoryIds) ? entry.subcategoryIds : [];
+
+        totalSubcategories += subcategoryIds.length;
+        lines.push(`- ${categoryName} [${entry.id}]`);
+
+        if (subcategoryIds.length === 0) {
+            lines.push("  Subcategories: none selected");
+            return;
+        }
+
+        const subcategoryMap = subcategoryMapByCategory.get(entry.id) || new Map();
+        const namedSubcategories = subcategoryIds.map((subcategoryId) => {
+            const subcategory = subcategoryMap.get(subcategoryId);
+            const subcategoryName = subcategory && subcategory.name ? subcategory.name : subcategoryId;
+            return `${subcategoryName} [${subcategoryId}]`;
+        });
+
+        lines.push(`  Subcategories (${subcategoryIds.length}): ${namedSubcategories.join(", ")}`);
+    });
+
+    return `Categories: ${snapshot.length}\nSubcategories: ${totalSubcategories}\n\n${lines.join("\n")}`;
+}
+
+function updateCategorySelectionPreview() {
+    if (!elements.categorySelectionPreview) {
+        return;
+    }
+
+    elements.categorySelectionPreview.textContent = buildCategorySelectionPreviewText();
+}
+
+function renderCategorySelection() {
+    if (!elements.categorySelectionList) {
+        return;
+    }
+
+    const tree = buildCategoryTree(categoryTaxonomyItems);
+    elements.categorySelectionList.innerHTML = "";
+
+    if (tree.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "category-selection-empty";
+        empty.textContent = "Category taxonomy is not available.";
+        elements.categorySelectionList.appendChild(empty);
+        updateCategorySelectionSummary();
+        return;
+    }
+
+    tree.forEach((category) => {
+        const categoryItem = document.createElement("article");
+        categoryItem.className = "category-item";
+
+        const header = document.createElement("label");
+        header.className = "category-item-header";
+
+        const categoryCheck = document.createElement("input");
+        categoryCheck.type = "checkbox";
+        categoryCheck.dataset.categoryId = category.id;
+        categoryCheck.checked = categorySelectionMap.has(category.id);
+
+        const categoryText = document.createElement("span");
+        categoryText.textContent = category.name;
+
+        header.appendChild(categoryCheck);
+        header.appendChild(categoryText);
+        categoryItem.appendChild(header);
+
+        const subcategoryList = document.createElement("div");
+        subcategoryList.className = "subcategory-list";
+
+        category.subcategories.forEach((subcategory) => {
+            const subLabel = document.createElement("label");
+            subLabel.className = "subcategory-item";
+
+            const subCheck = document.createElement("input");
+            subCheck.type = "checkbox";
+            subCheck.dataset.categoryId = category.id;
+            subCheck.dataset.subcategoryId = subcategory.id;
+
+            const selectedSubcategories = categorySelectionMap.get(category.id) || new Set();
+            subCheck.checked = selectedSubcategories.has(subcategory.id);
+
+            const subText = document.createElement("span");
+            subText.textContent = subcategory.name;
+
+            subLabel.appendChild(subCheck);
+            subLabel.appendChild(subText);
+            subcategoryList.appendChild(subLabel);
+        });
+
+        categoryItem.appendChild(subcategoryList);
+        elements.categorySelectionList.appendChild(categoryItem);
+    });
+
+    updateCategorySelectionSummary();
+}
+
+async function loadCategoryTaxonomyFromDesktop() {
+    if (!mmfDesktopApi || !mmfDesktopApi.getCategoryTaxonomy) {
+        categoryTaxonomyItems = [];
+        renderCategorySelection();
+        return;
+    }
+
+    try {
+        const response = await mmfDesktopApi.getCategoryTaxonomy();
+        if (!response || !response.ok || !Array.isArray(response.items)) {
+            categoryTaxonomyItems = [];
+            renderCategorySelection();
+            return;
+        }
+
+        categoryTaxonomyItems = normalizeCategoryTaxonomy(response.items).filter((item) => item.is_active !== false);
+        setCategorySelectionMapFromArray(getCategorySelectionSnapshot());
+        renderCategorySelection();
+    } catch (_error) {
+        categoryTaxonomyItems = [];
+        renderCategorySelection();
+    }
+}
+
 function normalizeModelEntry(entry) {
     if (typeof entry === "string") {
         const id = entry.trim();
-        return id ? { id, name: "" } : null;
+        return id
+            ? {
+                id,
+                name: "",
+                creatorId: "",
+                creatorName: "",
+                creatorUsername: ""
+            }
+            : null;
     }
 
     if (!entry || typeof entry !== "object") {
@@ -153,7 +529,12 @@ function normalizeModelEntry(entry) {
 
     return {
         id,
-        name: typeof entry.name === "string" ? entry.name.trim() : ""
+        name: typeof entry.name === "string" ? entry.name.trim() : "",
+        creatorId: entry.creatorId !== undefined && entry.creatorId !== null
+            ? String(entry.creatorId).trim()
+            : "",
+        creatorName: typeof entry.creatorName === "string" ? entry.creatorName.trim() : "",
+        creatorUsername: typeof entry.creatorUsername === "string" ? entry.creatorUsername.trim() : ""
     };
 }
 
@@ -181,6 +562,18 @@ function mergeModelEntries(existingEntries, incomingEntries) {
 
         if (!current.name && normalized.name) {
             current.name = normalized.name;
+        }
+
+        if (!current.creatorId && normalized.creatorId) {
+            current.creatorId = normalized.creatorId;
+        }
+
+        if (!current.creatorName && normalized.creatorName) {
+            current.creatorName = normalized.creatorName;
+        }
+
+        if (!current.creatorUsername && normalized.creatorUsername) {
+            current.creatorUsername = normalized.creatorUsername;
         }
     });
 
@@ -243,7 +636,10 @@ function getModelIdCatalogSnapshot() {
         .filter((entry) => entry && /^\d+$/.test(entry.id))
         .map((entry) => ({
             id: entry.id,
-            name: entry.name || ""
+            name: entry.name || "",
+            creatorId: entry.creatorId || "",
+            creatorName: entry.creatorName || "",
+            creatorUsername: entry.creatorUsername || ""
         }));
 }
 
@@ -340,9 +736,34 @@ function renderModelIdList() {
         idCell.className = "model-id-row-id";
         idCell.textContent = entry.id;
 
-        const nameCell = document.createElement("span");
-        nameCell.className = "model-id-row-name";
-        nameCell.textContent = entry.name || "—";
+        const nameCell = document.createElement("div");
+        nameCell.className = "model-id-row-name-group";
+
+        const modelName = document.createElement("span");
+        modelName.className = "model-id-row-name";
+        modelName.textContent = entry.name || "—";
+
+        const creatorMeta = document.createElement("div");
+        creatorMeta.className = "model-id-row-creator";
+        const creatorLabel = entry.creatorName || "Unknown creator";
+        const creatorIdLabel = entry.creatorId || "—";
+        const creatorUsername = entry.creatorUsername
+            ? ` @${entry.creatorUsername.replace(/^@+/, "")}`
+            : "";
+
+        const creatorIdChip = document.createElement("span");
+        creatorIdChip.className = "model-id-row-creator-id";
+        creatorIdChip.textContent = `ID ${creatorIdLabel}`;
+
+        const creatorDetails = document.createElement("span");
+        creatorDetails.className = "model-id-row-creator-details";
+        creatorDetails.textContent = `${creatorLabel}${creatorUsername}`;
+
+        creatorMeta.appendChild(creatorIdChip);
+        creatorMeta.appendChild(creatorDetails);
+
+        nameCell.appendChild(modelName);
+        nameCell.appendChild(creatorMeta);
 
         const removeBtn = document.createElement("button");
         removeBtn.type = "button";
@@ -367,14 +788,20 @@ function setModelIdEntriesFromText(inputText, catalog = []) {
     (Array.isArray(catalog) ? catalog : []).forEach((entry) => {
         const normalized = normalizeModelEntry(entry);
         if (normalized) {
-            catalogMap.set(normalized.id, normalized.name);
+            catalogMap.set(normalized.id, normalized);
         }
     });
 
-    modelIdEntries = tokens.map((id) => ({
-        id,
-        name: catalogMap.get(id) || ""
-    }));
+    modelIdEntries = tokens.map((id) => {
+        const catalogEntry = catalogMap.get(id);
+        return {
+            id,
+            name: catalogEntry ? catalogEntry.name || "" : "",
+            creatorId: catalogEntry ? catalogEntry.creatorId || "" : "",
+            creatorName: catalogEntry ? catalogEntry.creatorName || "" : "",
+            creatorUsername: catalogEntry ? catalogEntry.creatorUsername || "" : ""
+        };
+    });
 
     modelListUiPage = 1;
     syncIdsTextareaFromEntries();
@@ -604,6 +1031,7 @@ function buildRequirementState() {
     const idState = parseModelIds(elements.idsInput.value);
     const cookieState = analyzeCookie();
     const medusaAuthState = analyzeMedusaAuth();
+    const categoryState = getCategorySelectionValidation();
 
     const requirements = [
         {
@@ -655,6 +1083,14 @@ function buildRequirementState() {
             help: "Duplicates are allowed but not recommended."
         },
         {
+            label: "Category selection is valid",
+            pass: categoryState.isValid,
+            required: true,
+            help: categoryState.hasSelection
+                ? "Each selected category must include at least one subcategory."
+                : "No category selected (optional)."
+        },
+        {
             label: "Enhanced Step 2 test mode is acknowledged",
             pass: elements.testModeCheck.checked,
             required: false,
@@ -670,6 +1106,7 @@ function buildRequirementState() {
         idState,
         cookieState,
         medusaAuthState,
+        categoryState,
         requirements,
         requiredTotal,
         requiredPassed,
@@ -817,7 +1254,9 @@ function getSettingsSnapshot() {
         foldersPath: elements.foldersPathInput.value,
         namingFormat: elements.namingFormatSelect.value,
         maxNameLength: elements.maxLengthInput.value,
-        catalogLoadMode: getCatalogLoadMode()
+        catalogLoadMode: getCatalogLoadMode(),
+        catalogCreatorIdFilter: getCreatorIdFilter(),
+        categorySelection: getCategorySelectionSnapshot()
     };
 }
 
@@ -870,6 +1309,15 @@ function applySettingsToForm(settings) {
     if (typeof settings.catalogLoadMode === "string") {
         setCatalogLoadMode(settings.catalogLoadMode);
     }
+    if (typeof settings.catalogCreatorIdFilter === "string") {
+        setCreatorIdFilter(settings.catalogCreatorIdFilter);
+    } else if (typeof settings.creatorIdFilter === "string") {
+        setCreatorIdFilter(settings.creatorIdFilter);
+    }
+
+    setCategorySelectionMapFromArray(Array.isArray(settings.categorySelection) ? settings.categorySelection : []);
+    renderCategorySelection();
+    updateCreatorFilterVisibility();
 
     settingsApplyInProgress = false;
     refreshDashboard();
@@ -1117,6 +1565,15 @@ async function autoLoadOwnModelIds(options = {}) {
 
     const silent = Boolean(options && options.silent);
     const catalogLoadMode = getCatalogLoadMode();
+    const creatorIdFilter = getCreatorIdFilter();
+
+    if (catalogLoadMode === "creator" && !creatorIdFilter) {
+        setStatus("Creator filter mode requires a creator ID.", "bad");
+        if (elements.creatorIdFilterInput) {
+            elements.creatorIdFilterInput.focus();
+        }
+        return;
+    }
 
     if (!silent && modelIdEntries.length > 0) {
         const confirmed = window.confirm("Replace current model list with auto-loaded IDs?");
@@ -1153,7 +1610,8 @@ async function autoLoadOwnModelIds(options = {}) {
             cookie: buildCookieFromInputs(),
             medusaJwt: normalizeJwtValue(elements.jwtInput.value),
             medusaPublishableKey: normalizePublishableKeyValue(elements.publishableKeyInput.value),
-            catalogLoadMode
+            catalogLoadMode,
+            creatorIdFilter
         });
 
         if (!response || !response.ok) {
@@ -1171,8 +1629,11 @@ async function autoLoadOwnModelIds(options = {}) {
             const sources = Array.isArray(response.sourcesUsed)
                 ? response.sourcesUsed.join(", ")
                 : "catalog APIs";
+            const creatorSuffix = catalogLoadMode === "creator"
+                ? ` (creatorId ${creatorIdFilter})`
+                : "";
             setStatus(
-                `No models found for ${getCatalogLoadModeLabel(catalogLoadMode)} (mmf_id ${response.mmfId || "unknown"}, ${sources}).`,
+                `No models found for ${getCatalogLoadModeLabel(catalogLoadMode)}${creatorSuffix} (mmf_id ${response.mmfId || "unknown"}, ${sources}).`,
                 "warn"
             );
             return;
@@ -1649,6 +2110,9 @@ function collectExecutionConfig() {
         medusaJwt: normalizeJwtValue(elements.jwtInput.value),
         medusaPublishableKey: normalizePublishableKeyValue(elements.publishableKeyInput.value),
         modelIdsText: elements.idsInput.value,
+        catalogLoadMode: getCatalogLoadMode(),
+        creatorIdFilter: getCreatorIdFilter(),
+        categorySelection: getCategorySelectionSnapshot(),
         downloadRoot: elements.downloadRootInput.value,
         basePath: elements.basePathInput.value,
         extractInPlace: elements.extractModeSelect.value === "true",
@@ -1677,6 +2141,10 @@ function validateBeforeRun(stepKey) {
     if (stepKey === "step2-test" || stepKey === "step2-full") {
         if (!state.cookieState.hasPhpSession || !state.cookieState.hasCfClearance) {
             return "Step 2 requires both PHPSESSID and cf_clearance.";
+        }
+
+        if (!state.categoryState.isValid) {
+            return "Each selected category must include at least one subcategory before Step 2.";
         }
     }
 
@@ -2301,6 +2769,51 @@ if (elements.runPostProcessBtn) {
 elements.stopRunBtn.addEventListener("click", stopWorkflowStep);
 elements.clearLogBtn.addEventListener("click", clearRunLog);
 
+if (elements.creatorIdFilterInput) {
+    ["input", "change"].forEach((eventName) => {
+        elements.creatorIdFilterInput.addEventListener(eventName, () => {
+            refreshDashboard();
+            scheduleSettingsSave();
+        });
+    });
+}
+
+if (elements.categorySelectionList) {
+    elements.categorySelectionList.addEventListener("change", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement) || target.type !== "checkbox") {
+            return;
+        }
+
+        const categoryId = String(target.dataset.categoryId || "").trim();
+        if (!categoryId) {
+            return;
+        }
+
+        const subcategoryId = String(target.dataset.subcategoryId || "").trim();
+
+        if (!subcategoryId) {
+            if (!target.checked) {
+                categorySelectionMap.delete(categoryId);
+            } else if (!categorySelectionMap.has(categoryId)) {
+                categorySelectionMap.set(categoryId, new Set());
+            }
+        } else {
+            const subcategories = categorySelectionMap.get(categoryId) || new Set();
+            if (target.checked) {
+                subcategories.add(subcategoryId);
+            } else {
+                subcategories.delete(subcategoryId);
+            }
+            categorySelectionMap.set(categoryId, subcategories);
+        }
+
+        renderCategorySelection();
+        refreshDashboard();
+        scheduleSettingsSave();
+    });
+}
+
 [elements.phpSessidInput, elements.cfClearanceInput, elements.jwtInput, elements.publishableKeyInput, elements.testModeCheck].forEach((input) => {
     input.addEventListener("input", () => {
         refreshDashboard();
@@ -2369,17 +2882,22 @@ if (mmfDesktopApi && mmfDesktopApi.onWorkflowState) {
 
 getCatalogLoadModeInputs().forEach((input) => {
     input.addEventListener("change", () => {
+        updateCreatorFilterVisibility();
+        refreshDashboard();
         scheduleSettingsSave();
     });
 });
 
 setModelIdEntriesFromText(elements.idsInput.value);
 setupModelIdList();
+renderCategorySelection();
+updateCreatorFilterVisibility();
 setRunButtonsState();
 refreshDashboard();
 updatePathHelperHint();
 
 Promise.resolve()
+    .then(() => loadCategoryTaxonomyFromDesktop())
     .then(() => loadSavedSettings())
     .then(() => checkMmfSessionFromUi(true))
     .then(() => loadRuntimeInfo())

@@ -44,6 +44,8 @@ configureStoragePaths();
 
 const SETTINGS_FILE_NAME = "desktop-settings.json";
 const SECRET_SETTING_KEYS = ["cookie", "medusaJwt", "medusaPublishableKey"];
+const CATEGORY_TAXONOMY_FILE_NAME = "categories-taxonomy.json";
+const CATEGORY_TAXONOMY_RELATIVE_PATH = path.join("gui", CATEGORY_TAXONOMY_FILE_NAME);
 const RATE_LIMITS = {
     metadataDelaySec: 6,
     stlFileDelaySec: 5,
@@ -71,7 +73,9 @@ const DEFAULT_SETTINGS = {
     foldersPath: "",
     namingFormat: "ID_NAME",
     maxNameLength: 80,
-    catalogLoadMode: "library"
+    catalogLoadMode: "library",
+    catalogCreatorIdFilter: "",
+    categorySelection: []
 };
 
 function getScriptRoot() {
@@ -137,7 +141,9 @@ function sanitizeSettings(raw) {
         foldersPath: typeof source.foldersPath === "string" ? source.foldersPath : DEFAULT_SETTINGS.foldersPath,
         namingFormat: source.namingFormat === "NAME_ONLY" ? "NAME_ONLY" : "ID_NAME",
         maxNameLength,
-        catalogLoadMode: normalizeCatalogLoadMode(source.catalogLoadMode)
+        catalogLoadMode: normalizeCatalogLoadMode(source.catalogLoadMode),
+        catalogCreatorIdFilter: normalizeCreatorIdFilter(source.catalogCreatorIdFilter),
+        categorySelection: sanitizeCategorySelection(source.categorySelection)
     };
 }
 
@@ -151,8 +157,16 @@ function normalizeCatalogLoadMode(value) {
         return legacyMap[normalized];
     }
 
-    const modes = ["listing", "library"];
+    const modes = ["listing", "library", "creator"];
     return modes.includes(normalized) ? normalized : DEFAULT_SETTINGS.catalogLoadMode;
+}
+
+function normalizeCreatorIdFilter(value) {
+    if (value === undefined || value === null) {
+        return "";
+    }
+
+    return String(value).trim();
 }
 
 function sanitizeModelIdCatalog(rawCatalog) {
@@ -176,11 +190,58 @@ function sanitizeModelIdCatalog(rawCatalog) {
         seen.add(id);
         catalog.push({
             id,
-            name: typeof entry.name === "string" ? entry.name.trim() : ""
+            name: typeof entry.name === "string" ? entry.name.trim() : "",
+            creatorId: entry.creatorId !== undefined && entry.creatorId !== null
+                ? String(entry.creatorId).trim()
+                : "",
+            creatorName: typeof entry.creatorName === "string" ? entry.creatorName.trim() : "",
+            creatorUsername: typeof entry.creatorUsername === "string" ? entry.creatorUsername.trim() : ""
         });
     });
 
     return catalog;
+}
+
+function sanitizeCategorySelection(rawSelection) {
+    if (!Array.isArray(rawSelection)) {
+        return [];
+    }
+
+    const merged = new Map();
+
+    rawSelection.forEach((entry) => {
+        if (!entry || typeof entry !== "object") {
+            return;
+        }
+
+        const categoryId = String(entry.id || "").trim();
+        if (!categoryId) {
+            return;
+        }
+
+        const rawSubcategoryIds = Array.isArray(entry.subcategoryIds)
+            ? entry.subcategoryIds
+            : Array.isArray(entry.subcategories)
+                ? entry.subcategories
+                : [];
+
+        const normalizedSubcategoryIds = [...new Set(
+            rawSubcategoryIds
+                .map((subcategoryId) => String(subcategoryId || "").trim())
+                .filter(Boolean)
+        )];
+
+        const existing = merged.get(categoryId) || new Set();
+        normalizedSubcategoryIds.forEach((subcategoryId) => existing.add(subcategoryId));
+        merged.set(categoryId, existing);
+    });
+
+    return [...merged.entries()]
+        .map(([id, subcategorySet]) => ({
+            id,
+            subcategoryIds: [...subcategorySet]
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function isSecretEncryptionAvailable() {
@@ -1047,6 +1108,246 @@ function getDefaultDownloadsPath() {
     return path.join(app.getPath("home"), "Downloads");
 }
 
+function getWorkflowTempDir() {
+    const tempDir = path.join(app.getPath("userData"), "workflow-temp");
+
+    try {
+        fs.mkdirSync(tempDir, { recursive: true });
+    } catch (_error) {
+        // Best-effort; caller can still fail later with a clear write error.
+    }
+
+    return tempDir;
+}
+
+function getWorkflowModelIdsPath() {
+    return path.join(getWorkflowTempDir(), "model_ids.txt");
+}
+
+function toPowerShellSingleQuoted(value) {
+    return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function isWindowsAdministrator() {
+    if (!isWindows) {
+        return true;
+    }
+
+    const powerShellPath = getPowerShellExecutablePath();
+    if (!powerShellPath) {
+        return false;
+    }
+
+    const result = runCommand(
+        powerShellPath,
+        [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "[bool]([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"
+        ],
+        10000
+    );
+
+    if (!result.ok) {
+        return false;
+    }
+
+    return /^true$/i.test(firstLine(result.stdout));
+}
+
+function isDirectoryWritable(targetPath) {
+    if (!targetPath || typeof targetPath !== "string") {
+        return false;
+    }
+
+    const resolved = path.resolve(targetPath);
+
+    try {
+        fs.mkdirSync(resolved, { recursive: true });
+    } catch (_error) {
+        return false;
+    }
+
+    try {
+        fs.accessSync(resolved, fs.constants.W_OK);
+    } catch (_error) {
+        return false;
+    }
+
+    const markerPath = path.join(
+        resolved,
+        `.mmf_write_probe_${process.pid}_${Date.now()}_${Math.random().toString(16).slice(2)}.tmp`
+    );
+
+    try {
+        fs.writeFileSync(markerPath, "ok", "utf8");
+        fs.unlinkSync(markerPath);
+        return true;
+    } catch (_error) {
+        try {
+            if (fs.existsSync(markerPath)) {
+                fs.unlinkSync(markerPath);
+            }
+        } catch (_cleanupError) {
+            // Ignore cleanup failures for probe files.
+        }
+
+        return false;
+    }
+}
+
+function relaunchCurrentAppAsAdmin() {
+    if (!isWindows) {
+        return {
+            ok: false,
+            message: "Admin elevation is only supported on Windows."
+        };
+    }
+
+    const powerShellPath = getPowerShellExecutablePath();
+    if (!powerShellPath) {
+        return {
+            ok: false,
+            message: "PowerShell was not found. Cannot request administrator privileges."
+        };
+    }
+
+    const executable = process.execPath;
+    const args = process.argv.slice(1);
+    const workingDirectory = process.cwd();
+    const argumentList = args.length > 0
+        ? `@(${args.map(toPowerShellSingleQuoted).join(", ")})`
+        : "@()";
+
+    const command = [
+        `Start-Process -FilePath ${toPowerShellSingleQuoted(executable)}`,
+        `-ArgumentList ${argumentList}`,
+        `-WorkingDirectory ${toPowerShellSingleQuoted(workingDirectory)}`,
+        "-Verb RunAs"
+    ].join(" ");
+
+    const result = runCommand(
+        powerShellPath,
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        30000
+    );
+
+    if (!result.ok) {
+        return {
+            ok: false,
+            message: firstLine(result.stderr || result.stdout || result.error)
+                || "Unable to trigger UAC elevation prompt."
+        };
+    }
+
+    return { ok: true };
+}
+
+function collectStepWriteTargets(stepKey, rawConfig) {
+    const config = rawConfig && typeof rawConfig === "object" ? rawConfig : {};
+    const saved = loadSettingsFromDisk();
+    const runtime = resolveWorkflowPaths(config);
+
+    const basePath = cleanInputPath(config.basePath || saved.basePath) || runtime.stlFilesPath;
+    const foldersPath = cleanInputPath(config.foldersPath || saved.foldersPath) || runtime.stlFilesPath;
+
+    if (stepKey === "step1") {
+        return [runtime.downloadsPath, getWorkflowTempDir()];
+    }
+
+    if (stepKey === "step2-test" || stepKey === "step2-full") {
+        return [runtime.downloadsPath, runtime.stlFilesPath];
+    }
+
+    if (stepKey === "step3") {
+        return [basePath];
+    }
+
+    if (stepKey === "step4") {
+        return [foldersPath];
+    }
+
+    return [];
+}
+
+async function ensureWorkflowPermissions(stepKey, rawConfig) {
+    const targets = collectStepWriteTargets(stepKey, rawConfig)
+        .filter(Boolean)
+        .map((entry) => path.resolve(entry));
+
+    const uniqueTargets = [...new Set(targets)];
+    const blockedPaths = uniqueTargets.filter((targetPath) => !isDirectoryWritable(targetPath));
+
+    if (blockedPaths.length === 0) {
+        return {
+            ok: true,
+            blockedPaths: []
+        };
+    }
+
+    const blockedPreview = blockedPaths.slice(0, 3).join("\n");
+    const blockedSuffix = blockedPaths.length > 3
+        ? `\n(and ${blockedPaths.length - 3} more)`
+        : "";
+
+    if (!isWindows) {
+        return {
+            ok: false,
+            message: `Missing write permission for required path(s):\n${blockedPreview}${blockedSuffix}`,
+            blockedPaths
+        };
+    }
+
+    if (isWindowsAdministrator()) {
+        return {
+            ok: false,
+            message: `Write access is still blocked for:\n${blockedPreview}${blockedSuffix}\n\nChoose a different output folder or check folder ACLs.`,
+            blockedPaths
+        };
+    }
+
+    const dialogResult = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning",
+        buttons: ["Relaunch as Administrator", "Cancel"],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+        title: "Administrator Permissions Required",
+        message: "This workflow step needs elevated write access.",
+        detail: `Current user cannot write to:\n${blockedPreview}${blockedSuffix}\n\nApprove UAC to relaunch the app as Administrator. Then run the step again.`
+    });
+
+    if (dialogResult.response !== 0) {
+        return {
+            ok: false,
+            message: "Workflow canceled because administrator permissions were not granted.",
+            blockedPaths
+        };
+    }
+
+    const relaunch = relaunchCurrentAppAsAdmin();
+    if (!relaunch.ok) {
+        return {
+            ok: false,
+            message: relaunch.message || "Unable to relaunch app with administrator privileges.",
+            blockedPaths
+        };
+    }
+
+    setTimeout(() => {
+        app.quit();
+    }, 700);
+
+    return {
+        ok: false,
+        message: "Administrator elevation requested. Approve the UAC prompt and then run the step again.",
+        blockedPaths,
+        elevationRequested: true
+    };
+}
+
 function resolveWorkflowPaths(rawConfig) {
     const scriptRoot = getScriptRoot();
     const config = rawConfig && typeof rawConfig === "object" ? rawConfig : {};
@@ -1229,6 +1530,95 @@ function readModelJsonFile(payload) {
     }
 }
 
+function sanitizeCategoryTaxonomy(rawItems) {
+    if (!Array.isArray(rawItems)) {
+        return [];
+    }
+
+    const seen = new Set();
+    const items = [];
+
+    rawItems.forEach((entry) => {
+        if (!entry || typeof entry !== "object") {
+            return;
+        }
+
+        const id = String(entry.id || "").trim();
+        if (!id || seen.has(id)) {
+            return;
+        }
+
+        seen.add(id);
+        items.push({
+            id,
+            name: typeof entry.name === "string" ? entry.name.trim() : "",
+            slug: typeof entry.slug === "string" ? entry.slug.trim() : "",
+            description: typeof entry.description === "string" ? entry.description.trim() : "",
+            icon_url: entry.icon_url === null
+                ? null
+                : typeof entry.icon_url === "string" && entry.icon_url.trim()
+                    ? entry.icon_url.trim()
+                    : null,
+            is_active: entry.is_active !== false,
+            created_at: typeof entry.created_at === "string" ? entry.created_at.trim() : "",
+            parent_id: entry.parent_id === null || entry.parent_id === undefined
+                ? null
+                : String(entry.parent_id).trim() || null
+        });
+    });
+
+    return items;
+}
+
+function getCategoryTaxonomyPathCandidates() {
+    return [
+        path.join(__dirname, "..", CATEGORY_TAXONOMY_RELATIVE_PATH),
+        path.join(getScriptRoot(), CATEGORY_TAXONOMY_RELATIVE_PATH)
+    ];
+}
+
+function loadCategoryTaxonomy() {
+    const candidates = [...new Set(getCategoryTaxonomyPathCandidates())];
+
+    for (const candidatePath of candidates) {
+        if (!fs.existsSync(candidatePath)) {
+            continue;
+        }
+
+        try {
+            const rawText = fs.readFileSync(candidatePath, "utf8");
+            const parsed = JSON.parse(rawText);
+            const items = sanitizeCategoryTaxonomy(parsed);
+
+            if (items.length === 0) {
+                return {
+                    ok: false,
+                    message: `Category taxonomy file is empty or invalid: ${candidatePath}`,
+                    items: []
+                };
+            }
+
+            return {
+                ok: true,
+                filePath: candidatePath,
+                items
+            };
+        } catch (error) {
+            return {
+                ok: false,
+                message: `Failed to read category taxonomy: ${String(error.message || error)}`,
+                items: []
+            };
+        }
+    }
+
+    return {
+        ok: false,
+        message: `Category taxonomy file not found (${CATEGORY_TAXONOMY_FILE_NAME}).`,
+        items: []
+    };
+}
+
 async function pickDirectory(payload) {
     const options = payload && typeof payload === "object" ? payload : {};
     const title = typeof options.title === "string" && options.title.trim()
@@ -1403,6 +1793,12 @@ async function resolveOwnModelIds(rawConfig) {
     const medusaPublishableKey = normalizePublishableKey(
         config.medusaPublishableKey || saved.medusaPublishableKey || ""
     );
+    const creatorIdFilterSource = config.creatorIdFilter !== undefined
+        ? config.creatorIdFilter
+        : config.catalogCreatorIdFilter !== undefined
+            ? config.catalogCreatorIdFilter
+            : saved.catalogCreatorIdFilter;
+    const creatorIdFilter = normalizeCreatorIdFilter(creatorIdFilterSource);
     const catalogLoadMode = normalizeCatalogLoadMode(
         config.catalogLoadMode || saved.catalogLoadMode || DEFAULT_SETTINGS.catalogLoadMode
     );
@@ -1436,6 +1832,7 @@ async function resolveOwnModelIds(rawConfig) {
             medusaJwt,
             medusaPublishableKey,
             catalogLoadMode,
+            creatorIdFilter,
             rateLimits: RATE_LIMITS,
             onProgress: (payload) => emitRendererEvent("catalog:progress", payload)
         });
@@ -1630,6 +2027,11 @@ function buildStepPlan(stepKey, rawConfig) {
         config.medusaPublishableKey || saved.medusaPublishableKey || ""
     );
     const modelIdsText = normalizeModelIdsText(config.modelIdsText || saved.modelIdsText || "");
+    const categorySelectionSource = config.categorySelection !== undefined
+        ? config.categorySelection
+        : saved.categorySelection;
+    const categorySelection = sanitizeCategorySelection(categorySelectionSource);
+    const categorySelectionJson = JSON.stringify(categorySelection);
     const namingFormatSource = config.namingFormat || saved.namingFormat;
     const namingFormat = namingFormatSource === "NAME_ONLY" ? "NAME_ONLY" : "ID_NAME";
     const maxNameLengthInput = Number.parseInt(
@@ -1678,7 +2080,8 @@ function buildStepPlan(stepKey, rawConfig) {
             warnings.push("jq was detected in the WinGet package folder and injected into PATH for this run.");
         }
 
-        fs.writeFileSync(path.join(scriptRoot, "model_ids.txt"), `${modelIdsText}\n`, "utf8");
+        const modelIdsPath = getWorkflowModelIdsPath();
+        fs.writeFileSync(modelIdsPath, `${modelIdsText}\n`, "utf8");
 
         const scriptPath = path.join(scriptRoot, "1_mmf_download_metadata.sh");
         if (!ensureFileExists(scriptPath)) {
@@ -1700,7 +2103,7 @@ function buildStepPlan(stepKey, rawConfig) {
                 ...(medusaJwt ? { MMF_MEDUSA_JWT: medusaJwt } : {}),
                 ...(medusaPublishableKey ? { MMF_PUBLISHABLE_KEY: medusaPublishableKey } : {}),
                 MMF_DOWNLOAD_ROOT: downloadsPath,
-                MMF_MODEL_IDS_PATH: path.join(scriptRoot, "model_ids.txt"),
+                MMF_MODEL_IDS_PATH: modelIdsPath,
                 PATH: processPathWithResolvedJq,
                 ...getRateLimitEnv()
             },
@@ -1764,6 +2167,7 @@ function buildStepPlan(stepKey, rawConfig) {
                 MMF_COOKIE: cookie,
                 ...(medusaJwt ? { MMF_MEDUSA_JWT: medusaJwt } : {}),
                 ...(medusaPublishableKey ? { MMF_PUBLISHABLE_KEY: medusaPublishableKey } : {}),
+                MMF_CATEGORY_SELECTION_JSON: categorySelectionJson,
                 MMF_NAMING_FORMAT: namingFormat,
                 MMF_MAX_NAME_LENGTH: String(maxNameLength),
                 PATH: processPathWithResolvedJq,
@@ -2028,6 +2432,10 @@ ipcMain.handle("desktop:read-model-json-file", async (_event, payload) => {
     return readModelJsonFile(payload);
 });
 
+ipcMain.handle("desktop:get-category-taxonomy", async () => {
+    return loadCategoryTaxonomy();
+});
+
 ipcMain.handle("desktop:load-settings", async () => {
     return loadSettingsFromDisk();
 });
@@ -2095,6 +2503,15 @@ ipcMain.handle("desktop:close-mmf-login", async () => {
 
 ipcMain.handle("desktop:start-workflow-step", async (_event, payload) => {
     const stepKey = payload && typeof payload.stepKey === "string" ? payload.stepKey : "";
+    const permissionCheck = await ensureWorkflowPermissions(stepKey, payload ? payload.config : null);
+    if (!permissionCheck.ok) {
+        return {
+            accepted: false,
+            message: permissionCheck.message || "Unable to access workflow paths.",
+            elevationRequested: Boolean(permissionCheck.elevationRequested)
+        };
+    }
+
     const plan = buildStepPlan(stepKey, payload ? payload.config : null);
     if (!plan.accepted) {
         return {

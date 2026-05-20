@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.3.0] — 2026-05-20
+
+### Added
+- New **Creator** catalog mode with creator ID filter in the desktop UI and backend catalog resolution.
+- Creator metadata propagation end-to-end (`creatorId`, `creatorName`, `creatorUsername`) and rendering in model list rows.
+- Category taxonomy support from `gui/categories-taxonomy.json` with category + subcategory multi-select rules.
+- Category selection summary in the UI and export of selected categories into compact model JSON.
+- Collapsible categories/subcategories section to reduce scroll fatigue.
+- Download hardening in Step 1 and Step 2: atomic `.part` writes, proactive free-space checks, and explicit `curl` write-error handling.
+- ZIP integrity validation path (when `unzip`/`zip` tools are available) before accepting archives as valid.
+- Automatic cleanup of orphan `.part` files at startup in Step 1 and Step 2.
+- Windows permission preflight for workflow steps with optional UAC relaunch as Administrator when write access is blocked.
+- Compatibility wrapper in `2_mmf_download_stl_files.sh` delegating execution to `mmf_download_stl_files_enhanced.sh`.
+- `.gitattributes` policy to keep Bash scripts on LF line endings.
+
+### Changed
+- Step 1 now writes runtime `model_ids.txt` into app user data (`workflow-temp`) instead of script root to reduce permission failures.
+- Default minimum free-space thresholds were raised:
+  - Step 1: `MMF_METADATA_MIN_FREE_MB=512`
+  - Step 2: `MMF_MIN_FREE_SPACE_MB=2048`
+
+### Fixed
+- Resume behavior now discards invalid/truncated previously downloaded files and re-downloads safely.
+- Better handling for low-disk and restricted-folder scenarios that previously caused silent partial outputs.
+
 ## [1.2.0] — 2026-05-19
 
 ### Added
