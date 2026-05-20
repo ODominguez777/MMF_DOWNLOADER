@@ -240,7 +240,7 @@ label {
 }
 
 textarea,
-input,
+input:not([type="radio"]):not([type="checkbox"]),
 select {
     width: 100%;
     border: 1px solid rgba(16, 35, 29, 0.24);
@@ -300,6 +300,129 @@ select:focus {
 
 .advanced-panel[open] summary {
     margin-bottom: 12px;
+}
+
+.catalog-load-mode {
+    margin: 4px 0 14px;
+    padding: 0;
+    border: none;
+    min-width: 0;
+}
+
+.catalog-load-mode legend {
+    display: block;
+    width: 100%;
+    font-size: 0.94rem;
+    font-weight: 700;
+    letter-spacing: normal;
+    text-transform: none;
+    color: var(--ink);
+    margin: 0 0 10px;
+    padding: 0;
+}
+
+.catalog-load-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.catalog-load-card {
+    position: relative;
+    display: block;
+    margin: 0;
+    cursor: pointer;
+    font-weight: normal;
+}
+
+.catalog-load-card input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.catalog-load-card-inner {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    min-height: 100%;
+    padding: 12px 14px;
+    border: 1px solid var(--edge);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.72);
+    box-shadow: 0 2px 8px rgba(16, 35, 29, 0.04);
+    transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.catalog-load-card:hover .catalog-load-card-inner {
+    border-color: rgba(15, 118, 110, 0.35);
+    background: rgba(255, 255, 255, 0.92);
+}
+
+.catalog-load-card:has(input:checked) .catalog-load-card-inner {
+    border-color: var(--accent);
+    background: rgba(15, 118, 110, 0.09);
+    box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
+}
+
+.catalog-load-card:has(input:focus-visible) .catalog-load-card-inner {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.catalog-load-card-radio {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    border-radius: 50%;
+    border: 2px solid rgba(16, 35, 29, 0.22);
+    background: #fff;
+    transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.catalog-load-card:has(input:checked) .catalog-load-card-radio {
+    border-color: var(--accent);
+    background: var(--accent);
+    box-shadow: inset 0 0 0 4px #fff;
+}
+
+.catalog-load-card-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.catalog-load-card-title {
+    font-size: 0.92rem;
+    font-weight: 700;
+    color: var(--ink);
+    line-height: 1.3;
+}
+
+.catalog-load-card-desc {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--muted);
+    line-height: 1.45;
+}
+
+.catalog-load-hint {
+    margin-top: 0;
+    margin-bottom: 12px;
+}
+
+@media (max-width: 720px) {
+    .catalog-load-grid {
+        grid-template-columns: 1fr;
+    }
 }
 
 .model-id-list-header {

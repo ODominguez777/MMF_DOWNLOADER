@@ -137,6 +137,103 @@ sanitize_filename() {
     printf "%s" "$sanitized_name"
 }
 
+FOLDER_NAMING_FORMAT="${MMF_NAMING_FORMAT:-ID_NAME}"
+MAX_FOLDER_NAME_LENGTH="${MMF_MAX_NAME_LENGTH:-80}"
+
+if [[ "$FOLDER_NAMING_FORMAT" != "NAME_ONLY" ]]; then
+    FOLDER_NAMING_FORMAT="ID_NAME"
+fi
+
+if [[ ! "$MAX_FOLDER_NAME_LENGTH" =~ ^[0-9]+$ ]]; then
+    MAX_FOLDER_NAME_LENGTH=80
+fi
+
+if [[ "$MAX_FOLDER_NAME_LENGTH" -lt 10 ]]; then
+    MAX_FOLDER_NAME_LENGTH=10
+elif [[ "$MAX_FOLDER_NAME_LENGTH" -gt 160 ]]; then
+    MAX_FOLDER_NAME_LENGTH=160
+fi
+
+sanitize_folder_name() {
+    local name="$1"
+    local cleaned=""
+
+    cleaned="$(printf "%s" "$name" | tr -d '\r\n')"
+    cleaned="$(printf "%s" "$cleaned" | sed -E 's/[<>:"/\\|?*]/_/g; s/[[:space:]]+/ /g; s/ /_/g; s/_+/_/g; s/^_+//; s/_+$//')"
+
+    if [[ -z "$cleaned" ]]; then
+        cleaned="unnamed_model"
+    fi
+
+    if [[ ${#cleaned} -gt $MAX_FOLDER_NAME_LENGTH ]]; then
+        cleaned="${cleaned:0:$MAX_FOLDER_NAME_LENGTH}"
+        cleaned="$(printf "%s" "$cleaned" | sed -E 's/_+$//')"
+    fi
+
+    if [[ -z "$cleaned" ]]; then
+        cleaned="unnamed_model"
+    fi
+
+    printf "%s" "$cleaned"
+}
+
+build_model_folder_name() {
+    local source_json="$1"
+    local model_id="$2"
+    local model_name=""
+    local clean_name=""
+
+    model_name=$($JQ_CMD -r '.name // ""' "$source_json" 2>/dev/null | tr -d '\r' | xargs)
+    clean_name=$(sanitize_folder_name "$model_name")
+
+    if [[ "$FOLDER_NAMING_FORMAT" == "NAME_ONLY" ]]; then
+        printf '%s' "$clean_name"
+        return
+    fi
+
+    printf '%s_%s' "$model_id" "$clean_name"
+}
+
+unique_model_dir_name() {
+    local desired_name="$1"
+    local model_id="$2"
+    local candidate="$desired_name"
+
+    if [[ ! -e "$candidate" ]]; then
+        printf '%s' "$candidate"
+        return
+    fi
+
+    local suffix=1
+    while [[ -e "${desired_name}_${suffix}" ]]; do
+        suffix=$((suffix + 1))
+    done
+
+    printf '%s' "${desired_name}_${suffix}"
+}
+
+resolve_model_dir() {
+    local model_id="$1"
+    local json_file="$2"
+    local preferred=""
+    local legacy="model_${model_id}"
+
+    preferred=$(build_model_folder_name "$json_file" "$model_id")
+
+    if [[ -d "$preferred" ]]; then
+        printf '%s' "$preferred"
+        return
+    fi
+
+    if [[ -d "$legacy" ]]; then
+        printf '%s' "$legacy"
+        return
+    fi
+
+    preferred=$(unique_model_dir_name "$preferred" "$model_id")
+    printf '%s' "$preferred"
+}
+
 unique_output_path() {
     local base_dir="$1"
     local target_name="$2"
@@ -164,6 +261,74 @@ unique_output_path() {
         fi
         suffix=$((suffix + 1))
     done
+}
+
+get_model_archive_basename() {
+    local source_json="$1"
+    local model_id="$2"
+    local model_name=""
+    local archive_base=""
+
+    model_name=$($JQ_CMD -r '.name // ""' "$source_json" 2>/dev/null | tr -d '\r' | xargs)
+    archive_base=$(sanitize_filename "$model_name")
+
+    if [[ -z "$archive_base" || "$archive_base" == "null" ]]; then
+        archive_base="model_${model_id}_assets"
+    fi
+
+    printf "%s" "$archive_base"
+}
+
+is_valid_archive_file() {
+    local file_path="$1"
+
+    if [[ ! -f "$file_path" ]] || [[ ! -s "$file_path" ]]; then
+        return 1
+    fi
+
+    if is_html_error "$file_path"; then
+        return 1
+    fi
+
+    return 0
+}
+
+find_existing_assets_archive() {
+    local model_dir="$1"
+    local archive_base="$2"
+    local candidate=""
+
+    if [[ ! -d "$model_dir" ]]; then
+        return 1
+    fi
+
+    candidate="${model_dir}/${archive_base}.zip"
+    if is_valid_archive_file "$candidate"; then
+        printf "%s" "$candidate"
+        return 0
+    fi
+
+    shopt -s nullglob
+    for candidate in "${model_dir}/${archive_base}"*.zip; do
+        if is_valid_archive_file "$candidate"; then
+            shopt -u nullglob
+            printf "%s" "$candidate"
+            return 0
+        fi
+    done
+    shopt -u nullglob
+
+    return 1
+}
+
+model_assets_already_archived() {
+    local model_dir="$1"
+    local source_json="$2"
+    local model_id="$3"
+    local archive_base=""
+
+    archive_base=$(get_model_archive_basename "$source_json" "$model_id")
+    find_existing_assets_archive "$model_dir" "$archive_base" >/dev/null
 }
 
 write_compact_model_json() {
@@ -251,6 +416,20 @@ download_model_images() {
         fi
 
         target_name=$(sanitize_filename "$target_name")
+        local canonical_image_path="${images_dir}/${target_name}"
+
+        if [[ -f "$canonical_image_path" ]] && [[ -s "$canonical_image_path" ]] && ! is_html_error "$canonical_image_path"; then
+            local existing_image_size
+            existing_image_size=$(get_file_size "$canonical_image_path")
+            echo -e "  ${GREEN}[SKIP] Image already downloaded: $(basename "$canonical_image_path") (${existing_image_size} bytes)${NC}"
+            successful_downloads=$((successful_downloads + 1))
+            continue
+        fi
+
+        if [[ -e "$canonical_image_path" ]]; then
+            rm -f "$canonical_image_path"
+        fi
+
         local output_path
         output_path=$(unique_output_path "$images_dir" "$target_name")
 
@@ -287,14 +466,17 @@ compress_non_json_assets() {
     local model_dir="$1"
     local source_json="$2"
     local model_id="$3"
-    local model_name=""
     local archive_base=""
+    local existing_archive=""
 
-    model_name=$($JQ_CMD -r '.name // ""' "$source_json" 2>/dev/null | tr -d '\r' | xargs)
-    archive_base=$(sanitize_filename "$model_name")
+    archive_base=$(get_model_archive_basename "$source_json" "$model_id")
+    existing_archive=$(find_existing_assets_archive "$model_dir" "$archive_base" || true)
 
-    if [[ -z "$archive_base" || "$archive_base" == "null" ]]; then
-        archive_base="model_${model_id}_assets"
+    if [[ -n "$existing_archive" ]]; then
+        local existing_size
+        existing_size=$(get_file_size "$existing_archive")
+        echo -e "  ${GREEN}[SKIP] Assets archive already exists: $(basename "$existing_archive") (${existing_size} bytes)${NC}"
+        return 0
     fi
 
     local archive_name="${archive_base}.zip"
@@ -391,6 +573,7 @@ if [[ $json_count -eq 0 ]]; then
 fi
 
 echo -e "${BLUE}Found $json_count JSON files to process${NC}"
+echo -e "${BLUE}Output folders: $FOLDER_NAMING_FORMAT (readable names; legacy model_<id> still supported)${NC}"
 
 # TEST MODE - Download just one file to verify everything works
 if [[ "$TEST_MODE" == true ]]; then
@@ -486,6 +669,7 @@ successful_downloads=0
 consecutive_failures=0
 compact_json_written=0
 zip_created=0
+models_zip_skipped=0
 not_owned_skipped=0
 models_without_file_downloads=0
 
@@ -517,10 +701,25 @@ for json_file in ../model_*.json; do
         continue
     fi
 
-    # Create directory for this model
-    model_dir="model_${model_id}"
+    # Create directory for this model (readable name; falls back to legacy model_<id> if present)
+    model_dir=$(resolve_model_dir "$model_id" "$json_file")
     mkdir -p "$model_dir"
+    if [[ "$model_dir" != "model_${model_id}" ]]; then
+        echo -e "  ${CYAN}Using folder: ${model_dir}/${NC}"
+    fi
     model_file_successful_downloads=0
+    model_assets_complete=0
+    existing_assets_archive=""
+
+    if model_assets_already_archived "$model_dir" "$json_file" "$model_id"; then
+        existing_assets_archive=$(find_existing_assets_archive "$model_dir" "$(get_model_archive_basename "$json_file" "$model_id")")
+        existing_archive_size=$(get_file_size "$existing_assets_archive")
+        echo -e "  ${GREEN}[SKIP] Model assets already archived in $(basename "$existing_assets_archive") (${existing_archive_size} bytes) — skipping STL/ZIP re-download.${NC}"
+        model_file_successful_downloads=$downloadable_file_count
+        model_assets_complete=1
+        models_zip_skipped=$((models_zip_skipped + 1))
+        successful_downloads=$((successful_downloads + downloadable_file_count))
+    fi
 
     # Extract downloadable files from metadata
     download_data=$($JQ_CMD -r '.files.items[]? | "\(.filename // "")|\(.download_url // "")"' "$json_file" 2>/dev/null)
@@ -531,7 +730,7 @@ for json_file in ../model_*.json; do
         models_without_file_downloads=$((models_without_file_downloads + 1))
         echo ""
         continue
-    else
+    elif [[ "$model_assets_complete" -eq 0 ]]; then
         while IFS='|' read -r filename download_url; do
             if [[ -z "$filename" ]]; then
                 continue
@@ -546,16 +745,22 @@ for json_file in ../model_*.json; do
                 continue
             fi
 
-            output_file="$(unique_output_path "$model_dir" "$filename")"
+            canonical_output="${model_dir}/${filename}"
 
-            if [[ -f "$output_file" ]] && [[ -s "$output_file" ]] && ! is_html_error "$output_file"; then
-                file_size=$(get_file_size "$output_file")
-                echo -e "  ${GREEN}[SKIP] Already downloaded: $(basename "$output_file") (${file_size} bytes)${NC}"
+            if [[ -f "$canonical_output" ]] && [[ -s "$canonical_output" ]] && ! is_html_error "$canonical_output"; then
+                file_size=$(get_file_size "$canonical_output")
+                echo -e "  ${GREEN}[SKIP] Already downloaded: $(basename "$canonical_output") (${file_size} bytes)${NC}"
                 successful_downloads=$((successful_downloads + 1))
                 model_file_successful_downloads=$((model_file_successful_downloads + 1))
                 consecutive_failures=0
                 continue
             fi
+
+            if [[ -e "$canonical_output" ]]; then
+                rm -f "$canonical_output"
+            fi
+
+            output_file="$(unique_output_path "$model_dir" "$filename")"
 
             total_downloads=$((total_downloads + 1))
 
@@ -644,7 +849,9 @@ for json_file in ../model_*.json; do
     download_model_images "$json_file" "$model_dir"
 
     # Compress only model root files to a zip archive; images stay in model_<id>/images
-    if compress_non_json_assets "$model_dir" "$json_file" "$model_id"; then
+    if [[ "$model_assets_complete" -eq 1 ]]; then
+        zip_created=$((zip_created + 1))
+    elif compress_non_json_assets "$model_dir" "$json_file" "$model_id"; then
         zip_created=$((zip_created + 1))
     fi
 
@@ -664,9 +871,12 @@ fi
 if [[ "$models_without_file_downloads" -gt 0 ]]; then
     echo -e "${YELLOW}Skipped model outputs with zero downloaded files: $models_without_file_downloads${NC}"
 fi
+if [[ "$models_zip_skipped" -gt 0 ]]; then
+    echo -e "${GREEN}Models skipped (assets ZIP already present): $models_zip_skipped${NC}"
+fi
 echo -e "${GREEN}Compact JSON files written: $compact_json_written${NC}"
 echo -e "${GREEN}ZIP archives created: $zip_created${NC}"
-echo -e "${BLUE}Output structure: stl_files/model_<id>/model_<id>.json + <model_name>.zip + images/${NC}"
+echo -e "${BLUE}Output structure: stl_files/<id>_<model_name>/model_<id>.json + <model_name>.zip + images/${NC}"
 echo ""
 
 echo "Sample of generated directories:"

@@ -49,8 +49,10 @@ const RATE_LIMITS = {
     stlFileDelaySec: 5,
     imageDelaySec: 3,
     medusaApiDelayMs: 2000,
-    catalogPageDelayMs: 1000,
-    catalogBatchSize: 25
+    catalogPageDelayMs: 800,
+    catalogBatchSize: 100,
+    catalogObjectPreviewsMaxBytes: 64 * 1024 * 1024,
+    catalogObjectPreviewsTimeoutMs: 180000
 };
 
 const DEFAULT_SETTINGS = {
@@ -68,7 +70,8 @@ const DEFAULT_SETTINGS = {
     jsonPath: "",
     foldersPath: "",
     namingFormat: "ID_NAME",
-    maxNameLength: 80
+    maxNameLength: 80,
+    catalogLoadMode: "library"
 };
 
 function getScriptRoot() {
@@ -133,8 +136,23 @@ function sanitizeSettings(raw) {
         jsonPath: typeof source.jsonPath === "string" ? source.jsonPath : DEFAULT_SETTINGS.jsonPath,
         foldersPath: typeof source.foldersPath === "string" ? source.foldersPath : DEFAULT_SETTINGS.foldersPath,
         namingFormat: source.namingFormat === "NAME_ONLY" ? "NAME_ONLY" : "ID_NAME",
-        maxNameLength
+        maxNameLength,
+        catalogLoadMode: normalizeCatalogLoadMode(source.catalogLoadMode)
     };
+}
+
+function normalizeCatalogLoadMode(value) {
+    const legacyMap = {
+        owned: "listing",
+        library_all: "library"
+    };
+    const normalized = typeof value === "string" ? value.trim() : "";
+    if (legacyMap[normalized]) {
+        return legacyMap[normalized];
+    }
+
+    const modes = ["listing", "library"];
+    return modes.includes(normalized) ? normalized : DEFAULT_SETTINGS.catalogLoadMode;
 }
 
 function sanitizeModelIdCatalog(rawCatalog) {
@@ -1328,16 +1346,21 @@ function requestJson(url, options = {}) {
         : {};
     const method = typeof options.method === "string" ? options.method : "GET";
     const timeoutMs = Number.isInteger(options.timeoutMs) ? options.timeoutMs : 25000;
+    const maxResponseBytes = Number.isInteger(options.maxResponseBytes) && options.maxResponseBytes > 0
+        ? options.maxResponseBytes
+        : 2_000_000;
 
     return new Promise((resolve, reject) => {
         const req = https.request(url, { method, headers }, (res) => {
             let raw = "";
+            let truncated = false;
 
             res.setEncoding("utf8");
             res.on("data", (chunk) => {
                 raw += chunk;
-                if (raw.length > 2_000_000) {
-                    raw = raw.slice(-2_000_000);
+                if (raw.length > maxResponseBytes) {
+                    truncated = true;
+                    raw = raw.slice(0, maxResponseBytes);
                 }
             });
 
@@ -1353,7 +1376,8 @@ function requestJson(url, options = {}) {
                     statusCode: res.statusCode || 0,
                     headers: res.headers || {},
                     text: raw,
-                    json: parsed
+                    json: parsed,
+                    truncated
                 });
             });
         });
@@ -1378,6 +1402,9 @@ async function resolveOwnModelIds(rawConfig) {
     const medusaJwt = normalizeMedusaJwt(config.medusaJwt || saved.medusaJwt || "");
     const medusaPublishableKey = normalizePublishableKey(
         config.medusaPublishableKey || saved.medusaPublishableKey || ""
+    );
+    const catalogLoadMode = normalizeCatalogLoadMode(
+        config.catalogLoadMode || saved.catalogLoadMode || DEFAULT_SETTINGS.catalogLoadMode
     );
 
     if (!cookie) {
@@ -1408,6 +1435,7 @@ async function resolveOwnModelIds(rawConfig) {
             cookie,
             medusaJwt,
             medusaPublishableKey,
+            catalogLoadMode,
             rateLimits: RATE_LIMITS,
             onProgress: (payload) => emitRendererEvent("catalog:progress", payload)
         });
@@ -1602,6 +1630,15 @@ function buildStepPlan(stepKey, rawConfig) {
         config.medusaPublishableKey || saved.medusaPublishableKey || ""
     );
     const modelIdsText = normalizeModelIdsText(config.modelIdsText || saved.modelIdsText || "");
+    const namingFormatSource = config.namingFormat || saved.namingFormat;
+    const namingFormat = namingFormatSource === "NAME_ONLY" ? "NAME_ONLY" : "ID_NAME";
+    const maxNameLengthInput = Number.parseInt(
+        config.maxNameLength !== undefined ? config.maxNameLength : saved.maxNameLength,
+        10
+    );
+    const maxNameLength = Number.isNaN(maxNameLengthInput)
+        ? 80
+        : Math.max(10, Math.min(160, maxNameLengthInput));
     const warnings = [];
 
     const bashPath = getBashExecutablePath();
@@ -1727,6 +1764,8 @@ function buildStepPlan(stepKey, rawConfig) {
                 MMF_COOKIE: cookie,
                 ...(medusaJwt ? { MMF_MEDUSA_JWT: medusaJwt } : {}),
                 ...(medusaPublishableKey ? { MMF_PUBLISHABLE_KEY: medusaPublishableKey } : {}),
+                MMF_NAMING_FORMAT: namingFormat,
+                MMF_MAX_NAME_LENGTH: String(maxNameLength),
                 PATH: processPathWithResolvedJq,
                 ...getRateLimitEnv()
             },

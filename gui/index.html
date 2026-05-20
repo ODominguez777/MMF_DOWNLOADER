@@ -100,6 +100,33 @@
                 </details>
 
                 <label>Your models</label>
+
+                <fieldset class="catalog-load-mode" aria-labelledby="catalogLoadModeLegend">
+                    <legend id="catalogLoadModeLegend">Auto load source</legend>
+                    <div class="catalog-load-grid">
+                        <label class="catalog-load-card">
+                            <input type="radio" name="catalogLoadMode" value="listing">
+                            <span class="catalog-load-card-inner">
+                                <span class="catalog-load-card-radio" aria-hidden="true"></span>
+                                <span class="catalog-load-card-text">
+                                    <span class="catalog-load-card-title">Listing</span>
+                                    <span class="catalog-load-card-desc">Models you created — only entries where your account is the creator.</span>
+                                </span>
+                            </span>
+                        </label>
+                        <label class="catalog-load-card">
+                            <input type="radio" name="catalogLoadMode" value="library" checked>
+                            <span class="catalog-load-card-inner">
+                                <span class="catalog-load-card-radio" aria-hidden="true"></span>
+                                <span class="catalog-load-card-text">
+                                    <span class="catalog-load-card-title">Library</span>
+                                    <span class="catalog-load-card-desc">Your full data library — creations, purchases, gifts, tribes, and downloads.</span>
+                                </span>
+                            </span>
+                        </label>
+                    </div>
+                </fieldset>
+
                 <div class="model-id-list-header" aria-hidden="true">
                     <span>ID</span>
                     <span>Model name</span>
@@ -113,7 +140,7 @@
                     <span id="modelListTotalInfo" class="model-list-total-info"></span>
                 </nav>
                 <textarea id="idsInput" class="hidden" tabindex="-1" aria-hidden="true"></textarea>
-                <p class="hint">Auto load uses the store API (25 per request, paginated). objectPreviews is merged only when MMF returns it (often one JSON blob). Downloads skip files already on disk so you can resume after refreshing session.</p>
+                <p class="hint catalog-load-hint">Both modes use objectPreviews. Large libraries are processed in chunks; the list shows 25 rows per page.</p>
 
                 <label for="downloadRootInput">Download folder</label>
                 <div class="path-picker">
@@ -134,7 +161,7 @@
                     <button id="clearSessionBtn" type="button" class="btn btn-secondary">Clear session</button>
                     <button id="validateBtn" type="button" class="btn btn-secondary">Validate setup</button>
                 </div>
-                <p class="hint">Auto load fetches your catalog in batches (25/page) from store API + objectPreviews, with names when available.</p>
+                <p class="hint">Auto load uses objectPreviews (usually one large JSON). Pagination is only used if the API signals it.</p>
 
                 <p id="statusMessage" class="status status-neutral">Ready to validate.</p>
             </section>
@@ -189,7 +216,7 @@
                 </li>
             </ol>
 
-            <p class="hint">Rate limits: ~10 metadata requests/min (6s delay), 5s between STL/ZIP downloads, 3s between images. Catalog auto-load fetches store pages in batches of 25. HTTP 429 triggers 45s backoff.</p>
+            <p class="hint">Rate limits: ~10 metadata requests/min (6s delay), 5s between STL/ZIP downloads, 3s between images. HTTP 429 triggers 45s backoff.</p>
             <p class="hint">In desktop mode, dependency checks run before this screen is usable.</p>
             <p id="runtimePath" class="hint">Execution root: resolving...</p>
 

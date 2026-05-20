@@ -1,5 +1,21 @@
 const MMF_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0";
 const OBJECT_PREVIEWS_URL = "https://www.myminifactory.com/api/data-library/objectPreviews";
+const CATALOG_LOAD_MODES = ["listing", "library"];
+const PREVIEW_PROCESS_CHUNK_SIZE = 400;
+
+function normalizeCatalogLoadMode(value) {
+    const normalized = typeof value === "string" ? value.trim() : "";
+    const legacyMap = {
+        owned: "listing",
+        library_all: "library"
+    };
+
+    if (legacyMap[normalized]) {
+        return legacyMap[normalized];
+    }
+
+    return CATALOG_LOAD_MODES.includes(normalized) ? normalized : "library";
+}
 
 function extractMmfCustomerProfile(meJson) {
     const customer = meJson && typeof meJson.customer === "object" ? meJson.customer : {};
@@ -47,7 +63,7 @@ function extractCatalogItemFromPreview(preview) {
         preview.originalId !== undefined && preview.originalId !== null
             ? preview.originalId
             : preview.id !== undefined && preview.id !== null
-                ? preview.id
+                ? String(preview.id).replace(/^object-/i, "")
                 : ""
     ).trim();
 
@@ -177,32 +193,98 @@ function parseObjectPreviewsPayload(json) {
     };
 }
 
-async function fetchJson(requestJson, url, cookie, extraHeaders = {}) {
+function previewMatchesLoadMode(preview, mmfId, loadMode) {
+    if (loadMode === "library") {
+        return true;
+    }
+
+    const creatorId = preview && preview.creatorId !== undefined && preview.creatorId !== null
+        ? String(preview.creatorId).trim()
+        : "";
+
+    return Boolean(mmfId) && creatorId === mmfId;
+}
+
+function yieldToEventLoop() {
+    return new Promise((resolve) => {
+        setImmediate(resolve);
+    });
+}
+
+async function mergePreviewsInChunks(collected, previews, mmfId, loadMode, onProgress) {
+    const total = previews.length;
+    if (total === 0) {
+        return 0;
+    }
+
+    let matched = 0;
+
+    for (let offset = 0; offset < total; offset += PREVIEW_PROCESS_CHUNK_SIZE) {
+        if (offset > 0) {
+            await yieldToEventLoop();
+        }
+
+        const end = Math.min(offset + PREVIEW_PROCESS_CHUNK_SIZE, total);
+        const chunkItems = [];
+
+        for (let index = offset; index < end; index += 1) {
+            const preview = previews[index];
+            if (!previewMatchesLoadMode(preview, mmfId, loadMode)) {
+                continue;
+            }
+
+            const item = extractCatalogItemFromPreview(preview);
+            if (item) {
+                chunkItems.push(item);
+            }
+        }
+
+        matched += chunkItems.length;
+        mergeCatalogItems(collected, chunkItems, "objectPreviews");
+
+        emitCatalogProgress(onProgress, {
+            phase: "library",
+            processed: end,
+            total,
+            collected: collected.size,
+            message: `Processing library: ${end.toLocaleString()} / ${total.toLocaleString()} entries (${collected.size.toLocaleString()} unique IDs)…`
+        });
+    }
+
+    return matched;
+}
+
+async function fetchJson(requestJson, url, cookie, extraHeaders = {}, requestOptions = {}) {
     return requestJson(url, {
         headers: {
             "User-Agent": MMF_USER_AGENT,
             Accept: "application/json",
             Cookie: cookie,
             ...extraHeaders
-        }
+        },
+        ...requestOptions
     });
 }
 
-async function fetchObjectPreviewsPage(requestJson, cookie, query = "") {
+async function fetchObjectPreviewsPage(requestJson, cookie, query = "", requestOptions = {}) {
     const suffix = query ? (query.startsWith("?") ? query : `?${query}`) : "";
-    return fetchJson(requestJson, `${OBJECT_PREVIEWS_URL}${suffix}`, cookie);
+    return fetchJson(requestJson, `${OBJECT_PREVIEWS_URL}${suffix}`, cookie, {}, requestOptions);
 }
 
-async function fetchAllObjectPreviews(requestJson, cookie, mmfId, sleep, pageDelayMs, batchSize, onProgress) {
+async function fetchAllObjectPreviews(requestJson, cookie, mmfId, loadMode, sleep, pageDelayMs, batchSize, rateLimits, onProgress) {
     const collected = new Map();
     const warnings = [];
+    const largeRequestOptions = {
+        maxResponseBytes: rateLimits.catalogObjectPreviewsMaxBytes || 64 * 1024 * 1024,
+        timeoutMs: rateLimits.catalogObjectPreviewsTimeoutMs || 180000
+    };
 
     emitCatalogProgress(onProgress, {
         phase: "library",
-        message: "Loading objectPreviews (library)…"
+        message: "Downloading objectPreviews (data library)…"
     });
 
-    const first = await fetchObjectPreviewsPage(requestJson, cookie);
+    const first = await fetchObjectPreviewsPage(requestJson, cookie, "", largeRequestOptions);
     if (first.statusCode !== 200) {
         return {
             ok: false,
@@ -212,25 +294,33 @@ async function fetchAllObjectPreviews(requestJson, cookie, mmfId, sleep, pageDel
         };
     }
 
+    if (first.truncated) {
+        return {
+            ok: false,
+            message: "objectPreviews response was truncated (library JSON exceeds size limit).",
+            items: [],
+            warnings
+        };
+    }
+
+    if (!first.json) {
+        return {
+            ok: false,
+            message: "objectPreviews response was not valid JSON.",
+            items: [],
+            warnings
+        };
+    }
+
     const parsedFirst = parseObjectPreviewsPayload(first.json);
-    const firstItems = parsedFirst.items
-        .filter((preview) => {
-            const creatorId = preview && preview.creatorId !== undefined && preview.creatorId !== null
-                ? String(preview.creatorId).trim()
-                : "";
-
-            return !mmfId || creatorId === mmfId;
-        })
-        .map(extractCatalogItemFromPreview)
-        .filter(Boolean);
-
-    mergeCatalogItems(collected, firstItems, "objectPreviews");
 
     if (!parsedFirst.paginated && parsedFirst.items.length > 0) {
         warnings.push(
-            `objectPreviews returned ${parsedFirst.items.length} item(s) in one response (library endpoint; pagination not used).`
+            `objectPreviews returned ${parsedFirst.items.length.toLocaleString()} entries in one response (no server pagination).`
         );
     }
+
+    const allPreviewRows = [...parsedFirst.items];
 
     if (parsedFirst.paginated) {
         const totalPages = parsedFirst.perPage > 0
@@ -249,10 +339,12 @@ async function fetchAllObjectPreviews(requestJson, cookie, mmfId, sleep, pageDel
                 collected: collected.size,
                 message: `objectPreviews: page ${page} of ~${maxPages}…`
             });
+
             const response = await fetchObjectPreviewsPage(
                 requestJson,
                 cookie,
-                `page=${page}&perPage=${batchSize}`
+                `page=${page}&perPage=${batchSize}`,
+                largeRequestOptions
             );
 
             if (response.statusCode !== 200) {
@@ -260,23 +352,17 @@ async function fetchAllObjectPreviews(requestJson, cookie, mmfId, sleep, pageDel
                 break;
             }
 
-            const parsed = parseObjectPreviewsPayload(response.json);
-            const pageItems = parsed.items
-                .filter((preview) => {
-                    const creatorId = preview && preview.creatorId !== undefined && preview.creatorId !== null
-                        ? String(preview.creatorId).trim()
-                        : "";
-
-                    return !mmfId || creatorId === mmfId;
-                })
-                .map(extractCatalogItemFromPreview)
-                .filter(Boolean);
-
-            if (pageItems.length === 0) {
+            if (response.truncated) {
+                warnings.push(`objectPreviews page ${page} was truncated; stopped pagination.`);
                 break;
             }
 
-            mergeCatalogItems(collected, pageItems, "objectPreviews");
+            const parsed = parseObjectPreviewsPayload(response.json);
+            if (parsed.items.length === 0) {
+                break;
+            }
+
+            allPreviewRows.push(...parsed.items);
             page += 1;
 
             if (parsed.items.length < batchSize) {
@@ -285,9 +371,27 @@ async function fetchAllObjectPreviews(requestJson, cookie, mmfId, sleep, pageDel
         }
     }
 
+    emitCatalogProgress(onProgress, {
+        phase: "library",
+        processed: 0,
+        total: allPreviewRows.length,
+        collected: 0,
+        message: `Parsing ${allPreviewRows.length.toLocaleString()} library entries…`
+    });
+
+    const matchedRows = await mergePreviewsInChunks(collected, allPreviewRows, mmfId, loadMode, onProgress);
+
+    if (loadMode === "listing" && matchedRows === 0 && allPreviewRows.length > 0) {
+        warnings.push(
+            `No library entries matched your creator ID (${mmfId}). Use “Library” to include purchases, gifts, and tribe models.`
+        );
+    }
+
     return {
         ok: true,
         items: [...collected.values()],
+        rawEntryCount: allPreviewRows.length,
+        matchedEntryCount: matchedRows,
         warnings
     };
 }
@@ -336,8 +440,8 @@ async function fetchAllStoreProducts(requestJson, username, cookie, sleep, pageD
                 totalPages: estimatedPages,
                 collected: collected.size,
                 message: estimatedPages
-                    ? `Store catalog (${mode.label}): page ${page} of ~${estimatedPages}…`
-                    : `Store catalog (${mode.label}): page ${page}…`
+                    ? `Store listing (${mode.label}): page ${page} of ~${estimatedPages}…`
+                    : `Store listing (${mode.label}): page ${page}…`
             });
 
             const response = await fetchStoreProductsPage(
@@ -393,11 +497,13 @@ async function resolveOwnCatalog({
     cookie,
     medusaJwt,
     medusaPublishableKey,
+    catalogLoadMode,
     rateLimits,
     onProgress
 }) {
-    const batchSize = rateLimits.catalogBatchSize || 25;
-    const pageDelayMs = rateLimits.catalogPageDelayMs || 1000;
+    const loadMode = normalizeCatalogLoadMode(catalogLoadMode);
+    const batchSize = rateLimits.catalogBatchSize || 100;
+    const pageDelayMs = rateLimits.catalogPageDelayMs || 800;
 
     emitCatalogProgress(onProgress, {
         phase: "account",
@@ -434,38 +540,21 @@ async function resolveOwnCatalog({
     const merged = new Map();
     const warnings = [];
     const sourcesUsed = [];
-
-    if (profile.username) {
-        const storeResult = await fetchAllStoreProducts(
-            requestJson,
-            profile.username,
-            cookie,
-            sleep,
-            pageDelayMs,
-            batchSize,
-            onProgress
-        );
-
-        warnings.push(...storeResult.warnings);
-        if (storeResult.ok) {
-            mergeCatalogItems(merged, storeResult.items, "store");
-            sourcesUsed.push("store");
-        }
-    } else {
-        warnings.push("MMF username not found in customer metadata; skipped paginated store API.");
-    }
+    let libraryRawCount = 0;
 
     const previewsResult = await fetchAllObjectPreviews(
         requestJson,
         cookie,
         profile.mmfId,
+        loadMode,
         sleep,
         pageDelayMs,
         batchSize,
+        rateLimits,
         onProgress
     );
 
-    if (!previewsResult.ok && merged.size === 0) {
+    if (!previewsResult.ok) {
         return {
             ok: false,
             message: previewsResult.message || "Failed to load objectPreviews."
@@ -473,9 +562,18 @@ async function resolveOwnCatalog({
     }
 
     warnings.push(...previewsResult.warnings);
-    if (previewsResult.ok && previewsResult.items.length > 0) {
+    libraryRawCount = previewsResult.rawEntryCount || 0;
+
+    if (previewsResult.items.length > 0) {
         mergeCatalogItems(merged, previewsResult.items, "objectPreviews");
         sourcesUsed.push("objectPreviews");
+    } else {
+        return {
+            ok: false,
+            message: loadMode === "listing"
+                ? `No models you created (creatorId ${profile.mmfId}) were found in your data library.`
+                : "objectPreviews returned no usable model IDs."
+        };
     }
 
     const items = [...merged.values()]
@@ -487,29 +585,36 @@ async function resolveOwnCatalog({
 
     const ids = items.map((item) => item.id);
 
+    const modeLabels = {
+        listing: "models you created",
+        library: "full data library"
+    };
+
     emitCatalogProgress(onProgress, {
         phase: "done",
         collected: ids.length,
-        message: `Catalog ready: ${ids.length} model(s).`
+        message: `Catalog ready: ${ids.length.toLocaleString()} model(s) (${modeLabels[loadMode] || loadMode}).`
     });
 
     return {
         ok: ids.length > 0,
         mmfId: profile.mmfId,
         username: profile.username,
+        catalogLoadMode: loadMode,
         items,
         ids,
         totalCount: items.length,
         ownedCount: items.length,
+        libraryRawCount,
         sourcesUsed,
         warnings,
-        message: ids.length > 0
-            ? ""
-            : `No owned object IDs found for mmf_id ${profile.mmfId}.`
+        message: ""
     };
 }
 
 module.exports = {
     resolveOwnCatalog,
-    extractMmfCustomerProfile
+    extractMmfCustomerProfile,
+    normalizeCatalogLoadMode,
+    CATALOG_LOAD_MODES
 };

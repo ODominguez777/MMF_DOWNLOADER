@@ -94,7 +94,47 @@ let pipelineRunning = false;
 let runtimeInfoCache = null;
 let modelIdEntries = [];
 const MODEL_LIST_UI_PAGE_SIZE = 25;
+const CATALOG_LOAD_MODES = ["listing", "library"];
 let modelListUiPage = 1;
+
+function getCatalogLoadModeInputs() {
+    return Array.from(document.querySelectorAll('input[name="catalogLoadMode"]'));
+}
+
+function getCatalogLoadMode() {
+    const selected = getCatalogLoadModeInputs().find((input) => input.checked);
+    const value = selected ? selected.value : "library";
+    return normalizeCatalogLoadModeValue(value);
+}
+
+function normalizeCatalogLoadModeValue(mode) {
+    const legacyMap = {
+        owned: "listing",
+        library_all: "library"
+    };
+    const normalized = typeof mode === "string" ? mode.trim() : "";
+    if (legacyMap[normalized]) {
+        return legacyMap[normalized];
+    }
+
+    return CATALOG_LOAD_MODES.includes(normalized) ? normalized : "library";
+}
+
+function setCatalogLoadMode(mode) {
+    const normalized = normalizeCatalogLoadModeValue(mode);
+    getCatalogLoadModeInputs().forEach((input) => {
+        input.checked = input.value === normalized;
+    });
+}
+
+function getCatalogLoadModeLabel(mode) {
+    const labels = {
+        listing: "listing (models you created)",
+        library: "library (all your models)"
+    };
+
+    return labels[normalizeCatalogLoadModeValue(mode)] || mode;
+}
 
 function normalizeModelEntry(entry) {
     if (typeof entry === "string") {
@@ -776,7 +816,8 @@ function getSettingsSnapshot() {
         jsonPath: elements.jsonPathInput.value,
         foldersPath: elements.foldersPathInput.value,
         namingFormat: elements.namingFormatSelect.value,
-        maxNameLength: elements.maxLengthInput.value
+        maxNameLength: elements.maxLengthInput.value,
+        catalogLoadMode: getCatalogLoadMode()
     };
 }
 
@@ -825,6 +866,9 @@ function applySettingsToForm(settings) {
     }
     if (settings.maxNameLength !== undefined && settings.maxNameLength !== null) {
         elements.maxLengthInput.value = String(settings.maxNameLength);
+    }
+    if (typeof settings.catalogLoadMode === "string") {
+        setCatalogLoadMode(settings.catalogLoadMode);
     }
 
     settingsApplyInProgress = false;
@@ -1053,7 +1097,7 @@ async function captureMmfSessionFromUi() {
         setStatus("MMF session captured and applied.", "ok");
 
         if (modelIdEntries.length === 0) {
-            await autoLoadOwnModelIds();
+            await autoLoadOwnModelIds({ silent: true });
         }
     } catch (err) {
         setStatus(`Session capture failed: ${String(err?.message || err)}`, "bad");
@@ -1065,14 +1109,17 @@ async function captureMmfSessionFromUi() {
     }
 }
 
-async function autoLoadOwnModelIds() {
+async function autoLoadOwnModelIds(options = {}) {
     if (!mmfDesktopApi || !mmfDesktopApi.resolveOwnModelIds) {
         setStatus("Auto-load is available only in desktop mode.", "warn");
         return;
     }
 
-    if (modelIdEntries.length > 0) {
-        const confirmed = window.confirm("Replace current Model IDs with your auto-loaded IDs?");
+    const silent = Boolean(options && options.silent);
+    const catalogLoadMode = getCatalogLoadMode();
+
+    if (!silent && modelIdEntries.length > 0) {
+        const confirmed = window.confirm("Replace current model list with auto-loaded IDs?");
         if (!confirmed) {
             setStatus("Auto-load canceled.", "warn");
             return;
@@ -1087,7 +1134,10 @@ async function autoLoadOwnModelIds() {
         button.textContent = "Loading...";
     }
 
-    setStatus("Resolving your mmf_id and loading your own catalog IDs...", "neutral");
+    setStatus(
+        `Loading ${getCatalogLoadModeLabel(catalogLoadMode)}…`,
+        "neutral"
+    );
 
     let unsubscribeCatalogProgress = null;
     if (mmfDesktopApi.onCatalogProgress) {
@@ -1102,7 +1152,8 @@ async function autoLoadOwnModelIds() {
         const response = await mmfDesktopApi.resolveOwnModelIds({
             cookie: buildCookieFromInputs(),
             medusaJwt: normalizeJwtValue(elements.jwtInput.value),
-            medusaPublishableKey: normalizePublishableKeyValue(elements.publishableKeyInput.value)
+            medusaPublishableKey: normalizePublishableKeyValue(elements.publishableKeyInput.value),
+            catalogLoadMode
         });
 
         if (!response || !response.ok) {
@@ -1121,7 +1172,7 @@ async function autoLoadOwnModelIds() {
                 ? response.sourcesUsed.join(", ")
                 : "catalog APIs";
             setStatus(
-                `No owned object IDs found for mmf_id ${response.mmfId || "unknown"} (${sources}).`,
+                `No models found for ${getCatalogLoadModeLabel(catalogLoadMode)} (mmf_id ${response.mmfId || "unknown"}, ${sources}).`,
                 "warn"
             );
             return;
@@ -1135,12 +1186,15 @@ async function autoLoadOwnModelIds() {
         const sourceLabel = Array.isArray(response.sourcesUsed) && response.sourcesUsed.length > 0
             ? response.sourcesUsed.join(" + ")
             : "catalog";
+        const rawSuffix = typeof response.libraryRawCount === "number" && response.libraryRawCount > catalogItems.length
+            ? ` from ${response.libraryRawCount.toLocaleString()} library entries`
+            : "";
         const warningSuffix = Array.isArray(response.warnings) && response.warnings.length > 0
             ? ` Note: ${response.warnings[0]}`
             : "";
 
         setStatus(
-            `Loaded ${catalogItems.length} IDs via ${sourceLabel} (${namedCount} with names, mmf_id ${response.mmfId}).${warningSuffix}`,
+            `Loaded ${catalogItems.length.toLocaleString()} IDs (${getCatalogLoadModeLabel(catalogLoadMode)} via ${sourceLabel}${rawSuffix}; ${namedCount.toLocaleString()} with names).${warningSuffix}`,
             "ok"
         );
     } catch (err) {
@@ -2312,6 +2366,12 @@ if (mmfDesktopApi && mmfDesktopApi.onWorkflowLog) {
 if (mmfDesktopApi && mmfDesktopApi.onWorkflowState) {
     mmfDesktopApi.onWorkflowState(handleWorkflowState);
 }
+
+getCatalogLoadModeInputs().forEach((input) => {
+    input.addEventListener("change", () => {
+        scheduleSettingsSave();
+    });
+});
 
 setModelIdEntriesFromText(elements.idsInput.value);
 setupModelIdList();
