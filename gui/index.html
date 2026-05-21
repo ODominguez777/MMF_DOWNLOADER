@@ -143,6 +143,27 @@
                     <p class="hint">Used only in Creator filter mode. It matches entries by creatorId.</p>
                 </div>
 
+                <div class="model-tools-grid">
+                    <div>
+                        <label for="modelSearchInput">Search loaded models and creators</label>
+                        <div class="search-inline">
+                            <input id="modelSearchInput" type="text" placeholder="Search by model name, creator username, creator name, creator ID, or model ID">
+                            <button id="modelSearchClearBtn" type="button" class="btn btn-secondary btn-inline">Clear</button>
+                        </div>
+                        <p class="hint">Includes creator username and creator name fallback for entries where username is missing.</p>
+                    </div>
+                    <div>
+                        <label for="batchSizeSelect">Batch size</label>
+                        <select id="batchSizeSelect">
+                            <option value="25">25 models</option>
+                            <option value="50">50 models</option>
+                            <option value="100">100 models</option>
+                            <option value="all">All pending models</option>
+                        </select>
+                        <p id="batchStatus" class="hint">Batch progress not initialized.</p>
+                    </div>
+                </div>
+
                 <div class="model-id-list-header" aria-hidden="true">
                     <span>ID</span>
                     <span>Model and creator</span>
@@ -173,6 +194,11 @@
                 </div>
                 <p class="hint">Step 1 and Step 2 use this folder. If empty, default is your system Downloads folder.</p>
 
+                <div class="download-history-box">
+                    <p class="hint download-history-title">Saved download folders</p>
+                    <ul id="downloadHistoryList" class="download-history-list" aria-label="Saved download folders"></ul>
+                </div>
+
                 <label class="checkline" for="testModeCheck">
                     <input id="testModeCheck" type="checkbox" checked>
                     I will run enhanced Step 2 in --test mode first.
@@ -180,6 +206,7 @@
 
                 <div class="button-row">
                     <button id="autoLoadMyIdsBtn" type="button" class="btn btn-primary">Auto load my IDs</button>
+                    <button id="resetBatchProgressBtn" type="button" class="btn btn-secondary">Reset batch progress</button>
                     <button id="clearCatalogBtn" type="button" class="btn btn-secondary">Clear model list</button>
                     <button id="clearSessionBtn" type="button" class="btn btn-secondary">Clear session</button>
                     <button id="validateBtn" type="button" class="btn btn-secondary">Validate setup</button>
@@ -249,6 +276,7 @@
             <h3 class="subheading">Run from desktop app</h3>
             <div class="run-grid">
                 <button id="runExecuteBtn" type="button" class="btn btn-primary">Execute Pipeline</button>
+                <button id="runNextBatchBtn" type="button" class="btn btn-secondary">Download Next Batch</button>
                 <button id="runStep1Btn" type="button" class="btn btn-primary hidden">Run Step 1</button>
                 <button id="runStep2TestBtn" type="button" class="btn btn-secondary hidden">Run Step 2 Test</button>
                 <button id="runStep2FullBtn" type="button" class="btn btn-secondary hidden">Run Step 2 Full</button>

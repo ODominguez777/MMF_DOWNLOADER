@@ -17,6 +17,10 @@ const elements = {
     modelListNextBtn: document.getElementById("modelListNextBtn"),
     modelListPageInfo: document.getElementById("modelListPageInfo"),
     modelListTotalInfo: document.getElementById("modelListTotalInfo"),
+    modelSearchInput: document.getElementById("modelSearchInput"),
+    modelSearchClearBtn: document.getElementById("modelSearchClearBtn"),
+    batchSizeSelect: document.getElementById("batchSizeSelect"),
+    batchStatus: document.getElementById("batchStatus"),
     openMmfLoginBtn: document.getElementById("openMmfLoginBtn"),
     captureMmfSessionBtn: document.getElementById("captureMmfSessionBtn"),
     checkSessionBtn: document.getElementById("checkSessionBtn"),
@@ -30,8 +34,10 @@ const elements = {
     downloadRootInput: document.getElementById("downloadRootInput"),
     browseDownloadRootBtn: document.getElementById("browseDownloadRootBtn"),
     openDownloadRootBtn: document.getElementById("openDownloadRootBtn"),
+    downloadHistoryList: document.getElementById("downloadHistoryList"),
     testModeCheck: document.getElementById("testModeCheck"),
     autoLoadMyIdsBtn: document.getElementById("autoLoadMyIdsBtn"),
+    resetBatchProgressBtn: document.getElementById("resetBatchProgressBtn"),
     clearCatalogBtn: document.getElementById("clearCatalogBtn"),
     clearSessionBtn: document.getElementById("clearSessionBtn"),
     validateBtn: document.getElementById("validateBtn"),
@@ -71,6 +77,7 @@ const elements = {
     depSkipBtn: document.getElementById("depSkipBtn"),
     runtimePath: document.getElementById("runtimePath"),
     runExecuteBtn: document.getElementById("runExecuteBtn"),
+    runNextBatchBtn: document.getElementById("runNextBatchBtn"),
     runStep1Btn: document.getElementById("runStep1Btn"),
     runStep2TestBtn: document.getElementById("runStep2TestBtn"),
     runStep2FullBtn: document.getElementById("runStep2FullBtn"),
@@ -102,7 +109,123 @@ let categoryTaxonomyItems = [];
 let categorySelectionMap = new Map();
 const MODEL_LIST_UI_PAGE_SIZE = 25;
 const CATALOG_LOAD_MODES = ["listing", "library", "creator"];
+const BATCH_SIZE_OPTIONS = ["25", "50", "100", "all"];
+const BATCH_STATUS_OPTIONS = ["idle", "running", "completed", "failed", "interrupted"];
+const DOWNLOAD_HISTORY_LIMIT = 20;
 let modelListUiPage = 1;
+let modelSearchQuery = "";
+let downloadRootHistory = [];
+let lastStableDownloadRoot = "";
+let batchProgressState = createDefaultBatchProgressState();
+let activeBatchPlan = null;
+
+function createDefaultBatchProgressState() {
+    return {
+        completedIds: [],
+        inProgress: false,
+        inProgressIds: [],
+        startedAt: "",
+        lastCompletedAt: "",
+        lastStatus: "idle",
+        lastError: "",
+        lastRunDownloadRoot: ""
+    };
+}
+
+function sanitizeBatchSizeSelectionValue(value) {
+    const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+    return BATCH_SIZE_OPTIONS.includes(normalized) ? normalized : "25";
+}
+
+function sanitizeNumericIdList(rawIds) {
+    if (!Array.isArray(rawIds)) {
+        return [];
+    }
+
+    const seen = new Set();
+    const sanitized = [];
+
+    rawIds.forEach((value) => {
+        const id = String(value || "").trim();
+        if (!/^\d+$/.test(id) || seen.has(id)) {
+            return;
+        }
+
+        seen.add(id);
+        sanitized.push(id);
+    });
+
+    return sanitized;
+}
+
+function sanitizeDownloadRootHistory(rawHistory) {
+    if (!Array.isArray(rawHistory)) {
+        return [];
+    }
+
+    const seen = new Set();
+    const sanitized = [];
+
+    rawHistory.forEach((entry) => {
+        const value = String(entry || "").trim();
+        if (!value) {
+            return;
+        }
+
+        const isLikelyWindowsPath = /^[a-z]:\\/i.test(value) || value.includes("\\");
+        const key = (runtimePlatform === "win32" || isLikelyWindowsPath)
+            ? value.toLowerCase()
+            : value;
+        if (seen.has(key)) {
+            return;
+        }
+
+        seen.add(key);
+        sanitized.push(value);
+    });
+
+    return sanitized.slice(0, DOWNLOAD_HISTORY_LIMIT);
+}
+
+function sanitizeBatchProgressState(raw) {
+    const source = raw && typeof raw === "object" ? raw : {};
+    const status = typeof source.lastStatus === "string"
+        ? source.lastStatus.trim().toLowerCase()
+        : "";
+
+    return {
+        completedIds: sanitizeNumericIdList(source.completedIds),
+        inProgress: typeof source.inProgress === "boolean" ? source.inProgress : false,
+        inProgressIds: sanitizeNumericIdList(source.inProgressIds),
+        startedAt: typeof source.startedAt === "string" ? source.startedAt.trim() : "",
+        lastCompletedAt: typeof source.lastCompletedAt === "string" ? source.lastCompletedAt.trim() : "",
+        lastStatus: BATCH_STATUS_OPTIONS.includes(status) ? status : "idle",
+        lastError: typeof source.lastError === "string" ? source.lastError.trim() : "",
+        lastRunDownloadRoot: typeof source.lastRunDownloadRoot === "string"
+            ? source.lastRunDownloadRoot.trim()
+            : ""
+    };
+}
+
+function getBatchSizeSelection() {
+    return sanitizeBatchSizeSelectionValue(elements.batchSizeSelect ? elements.batchSizeSelect.value : "25");
+}
+
+function setBatchSizeSelection(value) {
+    if (!elements.batchSizeSelect) {
+        return;
+    }
+
+    elements.batchSizeSelect.value = sanitizeBatchSizeSelectionValue(value);
+}
+
+function getBatchProgressSnapshot() {
+    return sanitizeBatchProgressState(batchProgressState);
+}
+
+function getDownloadRootHistorySnapshot() {
+    return sanitizeDownloadRootHistory(downloadRootHistory);
+}
 
 function getCatalogLoadModeInputs() {
     return Array.from(document.querySelectorAll('input[name="catalogLoadMode"]'));
@@ -623,6 +746,179 @@ function parseModelIdTokens(inputText) {
         .filter((token) => token.length > 0);
 }
 
+function getOrderedValidModelIds() {
+    const sourceText = elements.idsInput ? elements.idsInput.value : "";
+    return parseModelIds(sourceText).validIds;
+}
+
+function getCompletedModelIdSet() {
+    return new Set(sanitizeNumericIdList(batchProgressState.completedIds));
+}
+
+function getPendingModelIds() {
+    const orderedIds = getOrderedValidModelIds();
+    const completed = getCompletedModelIdSet();
+    return orderedIds.filter((id) => !completed.has(id));
+}
+
+function getCurrentBatchLimit() {
+    const mode = getBatchSizeSelection();
+    if (mode === "all") {
+        return Number.POSITIVE_INFINITY;
+    }
+
+    const parsed = Number.parseInt(mode, 10);
+    return Number.isNaN(parsed) || parsed <= 0 ? 25 : parsed;
+}
+
+function getNextBatchPlan() {
+    const pendingIds = getPendingModelIds();
+    const limit = getCurrentBatchLimit();
+    const ids = Number.isFinite(limit)
+        ? pendingIds.slice(0, limit)
+        : pendingIds;
+
+    return {
+        ids,
+        totalCount: getOrderedValidModelIds().length,
+        pendingCount: pendingIds.length,
+        completedCount: getCompletedModelIdSet().size,
+        batchMode: getBatchSizeSelection()
+    };
+}
+
+function reconcileBatchProgressWithCurrentIds() {
+    const allowedIds = new Set(getOrderedValidModelIds());
+    const nextCompleted = sanitizeNumericIdList(batchProgressState.completedIds)
+        .filter((id) => allowedIds.has(id));
+    const nextInProgressIds = sanitizeNumericIdList(batchProgressState.inProgressIds)
+        .filter((id) => allowedIds.has(id));
+
+    batchProgressState.completedIds = nextCompleted;
+    batchProgressState.inProgressIds = nextInProgressIds;
+
+    if (batchProgressState.inProgress && nextInProgressIds.length === 0) {
+        batchProgressState.inProgress = false;
+    }
+
+    updateBatchStatusUi();
+    renderDownloadRootHistory();
+}
+
+function updateBatchStatusUi() {
+    if (!elements.batchStatus) {
+        return;
+    }
+
+    const ordered = getOrderedValidModelIds();
+    const totalCount = ordered.length;
+    const completedCount = getCompletedModelIdSet().size;
+    const pendingCount = Math.max(totalCount - completedCount, 0);
+    const mode = getBatchSizeSelection();
+
+    if (totalCount === 0) {
+        elements.batchStatus.textContent = "Load model IDs to initialize batch progress.";
+        return;
+    }
+
+    if (batchProgressState.inProgress) {
+        const inProgressCount = sanitizeNumericIdList(batchProgressState.inProgressIds).length;
+        elements.batchStatus.textContent = `Batch running (${inProgressCount} model(s) in progress). Completed ${completedCount}/${totalCount}, pending ${pendingCount}.`;
+        return;
+    }
+
+    const nextBatchPlan = getNextBatchPlan();
+    const modeLabel = mode === "all" ? "all pending" : mode;
+
+    if (pendingCount === 0) {
+        elements.batchStatus.textContent = `All selected models are already completed (${completedCount}/${totalCount}).`;
+        return;
+    }
+
+    const lastErrorSuffix = batchProgressState.lastStatus === "failed" || batchProgressState.lastStatus === "interrupted"
+        ? ` Last issue: ${batchProgressState.lastError || "pipeline did not finish."}`
+        : "";
+
+    elements.batchStatus.textContent = `Batch mode ${modeLabel}. Completed ${completedCount}/${totalCount}, pending ${pendingCount}. Next run downloads ${nextBatchPlan.ids.length} model(s).${lastErrorSuffix}`;
+}
+
+function renderDownloadRootHistory() {
+    if (!elements.downloadHistoryList) {
+        return;
+    }
+
+    elements.downloadHistoryList.innerHTML = "";
+    const history = sanitizeDownloadRootHistory(downloadRootHistory);
+
+    if (history.length === 0) {
+        const emptyItem = document.createElement("li");
+        emptyItem.className = "download-history-item download-history-empty";
+        emptyItem.textContent = "No saved folders yet.";
+        elements.downloadHistoryList.appendChild(emptyItem);
+        return;
+    }
+
+    history.forEach((folderPath) => {
+        const item = document.createElement("li");
+        item.className = "download-history-item";
+
+        const pathLabel = document.createElement("span");
+        pathLabel.className = "download-history-path";
+        pathLabel.textContent = folderPath;
+        pathLabel.title = folderPath;
+
+        const openBtn = document.createElement("button");
+        openBtn.type = "button";
+        openBtn.className = "btn btn-secondary btn-inline";
+        openBtn.dataset.path = folderPath;
+        openBtn.textContent = "Open";
+
+        item.appendChild(pathLabel);
+        item.appendChild(openBtn);
+        elements.downloadHistoryList.appendChild(item);
+    });
+}
+
+function rememberDownloadRoot(pathValue, options = {}) {
+    const normalizedPath = String(pathValue || "").trim();
+    if (!normalizedPath) {
+        return;
+    }
+
+    const isLikelyWindowsPath = /^[a-z]:\\/i.test(normalizedPath) || normalizedPath.includes("\\");
+    const caseSensitive = !(runtimePlatform === "win32" || isLikelyWindowsPath);
+    const existing = sanitizeDownloadRootHistory(downloadRootHistory)
+        .filter((entry) => {
+            if (caseSensitive) {
+                return entry !== normalizedPath;
+            }
+
+            return entry.toLowerCase() !== normalizedPath.toLowerCase();
+        });
+
+    downloadRootHistory = [normalizedPath, ...existing].slice(0, DOWNLOAD_HISTORY_LIMIT);
+    renderDownloadRootHistory();
+
+    if (options.save !== false) {
+        scheduleSettingsSave();
+    }
+}
+
+function isDownloadRootLocked() {
+    return Boolean(activeRunId) || pipelineRunning || batchProgressState.inProgress;
+}
+
+function unlockModelSearchControls() {
+    if (elements.modelSearchInput) {
+        elements.modelSearchInput.disabled = false;
+        elements.modelSearchInput.readOnly = false;
+    }
+
+    if (elements.modelSearchClearBtn) {
+        elements.modelSearchClearBtn.disabled = false;
+    }
+}
+
 function syncIdsTextareaFromEntries() {
     if (!elements.idsInput) {
         return;
@@ -643,12 +939,46 @@ function getModelIdCatalogSnapshot() {
         }));
 }
 
+function normalizeSearchQueryValue(value) {
+    return String(value || "")
+        .toLowerCase()
+        .trim();
+}
+
+function getFilteredModelEntryRows() {
+    const query = normalizeSearchQueryValue(modelSearchQuery);
+    const rows = modelIdEntries.map((entry, index) => ({ entry, index }));
+
+    if (!query) {
+        return rows;
+    }
+
+    return rows.filter(({ entry }) => {
+        const creatorUsername = entry.creatorUsername
+            ? entry.creatorUsername.replace(/^@+/, "")
+            : "";
+
+        const searchable = [
+            entry.id,
+            entry.name,
+            entry.creatorId,
+            entry.creatorName,
+            creatorUsername
+        ]
+            .join(" ")
+            .toLowerCase();
+
+        return searchable.includes(query);
+    });
+}
+
 function getModelListPageCount() {
-    if (modelIdEntries.length === 0) {
+    const filteredTotal = getFilteredModelEntryRows().length;
+    if (filteredTotal === 0) {
         return 1;
     }
 
-    return Math.ceil(modelIdEntries.length / MODEL_LIST_UI_PAGE_SIZE);
+    return Math.ceil(filteredTotal / MODEL_LIST_UI_PAGE_SIZE);
 }
 
 function clampModelListUiPage() {
@@ -666,7 +996,7 @@ function updateModelListPaginationUi() {
         return;
     }
 
-    const total = modelIdEntries.length;
+    const total = getFilteredModelEntryRows().length;
     const pageCount = getModelListPageCount();
     const showPagination = total > MODEL_LIST_UI_PAGE_SIZE;
 
@@ -701,6 +1031,8 @@ function renderModelIdList() {
     elements.modelIdList.innerHTML = "";
     clampModelListUiPage();
 
+    const filteredRows = getFilteredModelEntryRows();
+
     const countById = new Map();
     modelIdEntries.forEach((entry) => {
         countById.set(entry.id, (countById.get(entry.id) || 0) + 1);
@@ -715,21 +1047,35 @@ function renderModelIdList() {
         return;
     }
 
-    const pageStart = (modelListUiPage - 1) * MODEL_LIST_UI_PAGE_SIZE;
-    const pageEntries = modelIdEntries.slice(pageStart, pageStart + MODEL_LIST_UI_PAGE_SIZE);
+    if (filteredRows.length === 0) {
+        const emptyItem = document.createElement("li");
+        emptyItem.className = "model-id-row model-id-row-empty";
+        emptyItem.textContent = "No rows match the current search. Try creator name, creator username, creator ID, model name, or model ID.";
+        elements.modelIdList.appendChild(emptyItem);
+        updateModelListPaginationUi();
+        return;
+    }
 
-    pageEntries.forEach((entry, offset) => {
-        const index = pageStart + offset;
+    const completedIds = getCompletedModelIdSet();
+
+    const pageStart = (modelListUiPage - 1) * MODEL_LIST_UI_PAGE_SIZE;
+    const pageEntries = filteredRows.slice(pageStart, pageStart + MODEL_LIST_UI_PAGE_SIZE);
+
+    pageEntries.forEach(({ entry, index }) => {
         const row = document.createElement("li");
         row.classList.add("model-id-row");
 
         const isNumeric = /^\d+$/.test(entry.id);
         const isDuplicate = (countById.get(entry.id) || 0) > 1;
+        const isCompleted = completedIds.has(entry.id);
 
         if (!isNumeric) {
             row.classList.add("model-id-row-invalid");
         } else if (isDuplicate) {
             row.classList.add("model-id-row-duplicate");
+        }
+        if (isCompleted) {
+            row.classList.add("model-id-row-completed");
         }
 
         const idCell = document.createElement("span");
@@ -805,6 +1151,7 @@ function setModelIdEntriesFromText(inputText, catalog = []) {
 
     modelListUiPage = 1;
     syncIdsTextareaFromEntries();
+    reconcileBatchProgressWithCurrentIds();
     renderModelIdList();
 }
 
@@ -816,12 +1163,32 @@ function setModelIdEntriesFromCatalog(items) {
     modelIdEntries = mergeModelEntries([], normalizedItems);
     modelListUiPage = 1;
     syncIdsTextareaFromEntries();
+    reconcileBatchProgressWithCurrentIds();
     renderModelIdList();
 }
 
 function setupModelIdList() {
     if (!elements.modelIdList || !elements.idsInput) {
         return;
+    }
+
+    if (elements.modelSearchInput) {
+        elements.modelSearchInput.addEventListener("input", () => {
+            modelSearchQuery = elements.modelSearchInput.value;
+            modelListUiPage = 1;
+            renderModelIdList();
+        });
+    }
+
+    if (elements.modelSearchClearBtn) {
+        elements.modelSearchClearBtn.addEventListener("click", () => {
+            modelSearchQuery = "";
+            if (elements.modelSearchInput) {
+                elements.modelSearchInput.value = "";
+            }
+            modelListUiPage = 1;
+            renderModelIdList();
+        });
     }
 
     if (elements.modelListPrevBtn) {
@@ -861,6 +1228,7 @@ function setupModelIdList() {
         modelIdEntries.splice(index, 1);
         clampModelListUiPage();
         syncIdsTextareaFromEntries();
+        reconcileBatchProgressWithCurrentIds();
         renderModelIdList();
         refreshDashboard();
         scheduleSettingsSave();
@@ -1235,6 +1603,8 @@ function refreshDashboard() {
     const state = buildRequirementState();
     renderRequirements(state);
     updateStats(state);
+    updateBatchStatusUi();
+    unlockModelSearchControls();
     setRunButtonsState();
     return state;
 }
@@ -1247,6 +1617,9 @@ function getSettingsSnapshot() {
         modelIdsText: elements.idsInput.value,
         modelIdCatalog: getModelIdCatalogSnapshot(),
         downloadRoot: elements.downloadRootInput.value,
+        downloadRootHistory: getDownloadRootHistorySnapshot(),
+        batchSizeSelection: getBatchSizeSelection(),
+        batchProgress: getBatchProgressSnapshot(),
         testModeCheck: elements.testModeCheck.checked,
         basePath: elements.basePathInput.value,
         extractInPlace: elements.extractModeSelect.value === "true",
@@ -1278,12 +1651,28 @@ function applySettingsToForm(settings) {
     if (typeof settings.medusaPublishableKey === "string") {
         elements.publishableKeyInput.value = normalizePublishableKeyValue(settings.medusaPublishableKey);
     }
+
+    batchProgressState = sanitizeBatchProgressState(settings.batchProgress);
+    setBatchSizeSelection(settings.batchSizeSelection);
+
     const modelIdsText = typeof settings.modelIdsText === "string"
         ? settings.modelIdsText
         : elements.idsInput.value;
     const catalog = Array.isArray(settings.modelIdCatalog) ? settings.modelIdCatalog : [];
     setModelIdEntriesFromText(modelIdsText, catalog);
+
+    const historyFromSettings = sanitizeDownloadRootHistory(settings.downloadRootHistory);
+    downloadRootHistory = historyFromSettings;
+
     elements.downloadRootInput.value = typeof settings.downloadRoot === "string" ? settings.downloadRoot : elements.downloadRootInput.value;
+    lastStableDownloadRoot = elements.downloadRootInput.value.trim();
+
+    if (lastStableDownloadRoot) {
+        rememberDownloadRoot(lastStableDownloadRoot, { save: false });
+    } else {
+        renderDownloadRootHistory();
+    }
+
     elements.testModeCheck.checked = typeof settings.testModeCheck === "boolean"
         ? settings.testModeCheck
         : elements.testModeCheck.checked;
@@ -1318,6 +1707,7 @@ function applySettingsToForm(settings) {
     setCategorySelectionMapFromArray(Array.isArray(settings.categorySelection) ? settings.categorySelection : []);
     renderCategorySelection();
     updateCreatorFilterVisibility();
+    reconcileBatchProgressWithCurrentIds();
 
     settingsApplyInProgress = false;
     refreshDashboard();
@@ -1364,13 +1754,36 @@ async function loadSavedSettings() {
 }
 
 function setRunButtonsState() {
-    const running = Boolean(activeRunId) || pipelineRunning;
+    const running = Boolean(activeRunId) || pipelineRunning || batchProgressState.inProgress;
 
     const readinessState = buildRequirementState();
     const readinessReady = readinessState.readiness === 100;
     const readinessHint = "Complete required checks first (5/5) to unlock this action.";
+    const nextBatchPlan = getNextBatchPlan();
+    const hasPendingBatch = nextBatchPlan.ids.length > 0;
+    const pendingHint = "All selected models are already completed. Use Reset batch progress to run them again.";
 
-    [elements.runExecuteBtn, elements.runStep1Btn].forEach((button) => {
+    [elements.runExecuteBtn, elements.runNextBatchBtn].forEach((button) => {
+        if (!button) {
+            return;
+        }
+
+        button.disabled = running || !readinessReady || !hasPendingBatch;
+
+        if (!readinessReady) {
+            button.title = readinessHint;
+            return;
+        }
+
+        if (!hasPendingBatch) {
+            button.title = pendingHint;
+            return;
+        }
+
+        button.title = "";
+    });
+
+    [elements.runStep1Btn].forEach((button) => {
         if (!button) {
             return;
         }
@@ -1393,6 +1806,30 @@ function setRunButtonsState() {
         button.disabled = running;
         button.title = "";
     });
+
+    if (elements.batchSizeSelect) {
+        elements.batchSizeSelect.disabled = running;
+    }
+
+    if (elements.resetBatchProgressBtn) {
+        elements.resetBatchProgressBtn.disabled = running;
+    }
+
+    if (elements.downloadRootInput) {
+        elements.downloadRootInput.disabled = running;
+        elements.downloadRootInput.title = running
+            ? "Download folder cannot be changed while a pipeline is active."
+            : "";
+    }
+
+    if (elements.browseDownloadRootBtn) {
+        elements.browseDownloadRootBtn.disabled = running;
+        elements.browseDownloadRootBtn.title = running
+            ? "Download folder cannot be changed while a pipeline is active."
+            : "";
+    }
+
+    unlockModelSearchControls();
 
     elements.stopRunBtn.disabled = !running;
 }
@@ -1664,6 +2101,8 @@ async function autoLoadOwnModelIds(options = {}) {
         if (typeof unsubscribeCatalogProgress === "function") {
             unsubscribeCatalogProgress();
         }
+
+        unlockModelSearchControls();
 
         if (button) {
             button.disabled = false;
@@ -2153,6 +2592,9 @@ function validateBeforeRun(stepKey) {
 
 async function startWorkflowStep(stepKey, label, options = {}) {
     const silent = options && options.silent === true;
+    const configOverride = options && options.configOverride && typeof options.configOverride === "object"
+        ? options.configOverride
+        : {};
 
     if (!mmfDesktopApi || !mmfDesktopApi.startWorkflowStep) {
         if (!silent) {
@@ -2209,7 +2651,10 @@ async function startWorkflowStep(stepKey, label, options = {}) {
     try {
         const response = await mmfDesktopApi.startWorkflowStep({
             stepKey,
-            config: collectExecutionConfig()
+            config: {
+                ...collectExecutionConfig(),
+                ...configOverride
+            }
         });
 
         if (!response.accepted) {
@@ -2255,6 +2700,86 @@ function waitForRunCompletion(runId) {
     });
 }
 
+function beginBatchPipeline(plan) {
+    activeBatchPlan = {
+        ids: sanitizeNumericIdList(plan.ids),
+        batchMode: plan.batchMode,
+        startedAt: new Date().toISOString(),
+        downloadRoot: getActiveDownloadsPath()
+    };
+
+    batchProgressState.inProgress = true;
+    batchProgressState.inProgressIds = [...activeBatchPlan.ids];
+    batchProgressState.startedAt = activeBatchPlan.startedAt;
+    batchProgressState.lastStatus = "running";
+    batchProgressState.lastError = "";
+    batchProgressState.lastRunDownloadRoot = activeBatchPlan.downloadRoot || "";
+
+    updateBatchStatusUi();
+    setRunButtonsState();
+}
+
+function finalizeBatchPipelineSuccess() {
+    const completed = new Set(sanitizeNumericIdList(batchProgressState.completedIds));
+    const completedNow = activeBatchPlan ? sanitizeNumericIdList(activeBatchPlan.ids) : [];
+    completedNow.forEach((id) => completed.add(id));
+
+    batchProgressState.completedIds = [...completed];
+    batchProgressState.inProgress = false;
+    batchProgressState.inProgressIds = [];
+    batchProgressState.lastCompletedAt = new Date().toISOString();
+    batchProgressState.lastStatus = "completed";
+    batchProgressState.lastError = "";
+
+    const currentDownloadRoot = getActiveDownloadsPath();
+    if (currentDownloadRoot) {
+        rememberDownloadRoot(currentDownloadRoot, { save: false });
+    }
+
+    activeBatchPlan = null;
+    reconcileBatchProgressWithCurrentIds();
+    updateBatchStatusUi();
+    scheduleSettingsSave();
+}
+
+function finalizeBatchPipelineFailure(message, status = "failed") {
+    if (!batchProgressState.inProgress && !activeBatchPlan) {
+        return;
+    }
+
+    batchProgressState.inProgress = false;
+    batchProgressState.inProgressIds = [];
+    batchProgressState.lastStatus = BATCH_STATUS_OPTIONS.includes(status) ? status : "failed";
+    batchProgressState.lastError = String(message || "Pipeline did not complete.");
+    activeBatchPlan = null;
+
+    updateBatchStatusUi();
+    scheduleSettingsSave();
+}
+
+function recoverInterruptedBatchState() {
+    const inProgressIds = sanitizeNumericIdList(batchProgressState.inProgressIds);
+    if (!batchProgressState.inProgress && inProgressIds.length === 0) {
+        return;
+    }
+
+    const interruptedCount = inProgressIds.length;
+    const runRoot = batchProgressState.lastRunDownloadRoot || "the last selected folder";
+
+    batchProgressState.inProgress = false;
+    batchProgressState.inProgressIds = [];
+    batchProgressState.lastStatus = "interrupted";
+    batchProgressState.lastError = interruptedCount > 0
+        ? `Application closed before finishing a batch (${interruptedCount} model(s) pending).`
+        : "Application closed before pipeline completion.";
+    activeBatchPlan = null;
+
+    updateBatchStatusUi();
+    appendRunLog(`[batch] ${batchProgressState.lastError}`, "stderr");
+    setStatus(`Detected interrupted pipeline from a previous session in ${runRoot}. Run Execute Pipeline again to continue that batch.`, "warn");
+    scheduleSettingsSave();
+}
+
 async function executePipeline() {
     if (!mmfDesktopApi || !mmfDesktopApi.startWorkflowStep) {
         setRunStatus("Desktop execution is unavailable in browser mode.", "bad");
@@ -2276,13 +2801,22 @@ async function executePipeline() {
         return;
     }
 
-    if (activeRunId || pipelineRunning) {
+    if (activeRunId || pipelineRunning || batchProgressState.inProgress) {
         setRunStatus("Another workflow step is already running.", "warn");
         return;
     }
 
+    const batchPlan = getNextBatchPlan();
+    if (batchPlan.ids.length === 0) {
+        setRunStatus("No pending models left in the current selection.", "warn");
+        setStatus("All selected models are already completed for this campaign. Use Reset batch progress if you want to start over.", "warn");
+        return;
+    }
+
     pipelineRunning = true;
+    beginBatchPipeline(batchPlan);
     setRunButtonsState();
+    await saveSettingsNow();
 
     const runTestStep = elements.testModeCheck.checked;
     const pipelineSteps = [
@@ -2291,13 +2825,15 @@ async function executePipeline() {
         { key: "step2-full", label: "Step 2 Full" }
     ];
 
-    appendRunLog("[pipeline] Starting automatic execution.");
+    appendRunLog(`[pipeline] Starting automatic execution for batch of ${batchPlan.ids.length} model(s).`);
+    appendRunLog(`[pipeline] Batch mode: ${batchPlan.batchMode}. Completed: ${batchPlan.completedCount}. Pending before run: ${batchPlan.pendingCount}.`);
     setRunStatus("Pipeline started.", "ok");
 
     const preSession = await checkMmfSessionFromUi(true);
     if (preSession && preSession.expired) {
         appendRunLog("[pipeline] Session expired before start. Capture a fresh session.", "stderr");
         setRunStatus("Pipeline blocked: MMF session expired.", "bad");
+        finalizeBatchPipelineFailure("Session expired before pipeline start.", "failed");
         pipelineRunning = false;
         setRunButtonsState();
         return;
@@ -2307,13 +2843,19 @@ async function executePipeline() {
 
     try {
         for (const step of pipelineSteps) {
-            const startResult = await startWorkflowStep(step.key, step.label, { silent: true });
+            const startResult = await startWorkflowStep(step.key, step.label, {
+                silent: true,
+                configOverride: step.key === "step1"
+                    ? { modelIdsText: batchPlan.ids.join("\n") }
+                    : {}
+            });
             if (!startResult || !startResult.accepted) {
                 const message = startResult && startResult.message
                     ? startResult.message
                     : `Failed to start ${step.label}.`;
                 appendRunLog(`[pipeline] ${message}`, "stderr");
                 setRunStatus(`Pipeline stopped: ${message}`, "bad");
+                finalizeBatchPipelineFailure(message, "failed");
                 return;
             }
 
@@ -2323,6 +2865,7 @@ async function executePipeline() {
             if (!outcome) {
                 appendRunLog("[pipeline] Missing run completion event.", "stderr");
                 setRunStatus("Pipeline stopped unexpectedly.", "bad");
+                finalizeBatchPipelineFailure("Missing run completion event.", "failed");
                 return;
             }
 
@@ -2337,6 +2880,7 @@ async function executePipeline() {
                             "stderr"
                         );
                         setRunStatus("Pipeline paused: session expired. Capture session and continue.", "warn");
+                        finalizeBatchPipelineFailure("Session expired between pipeline steps.", "interrupted");
                         return;
                     }
                 }
@@ -2347,14 +2891,17 @@ async function executePipeline() {
             if (outcome.type === "stopped") {
                 appendRunLog(`[pipeline] ${step.label} was stopped by user.`, "stderr");
                 setRunStatus("Pipeline stopped by user.", "warn");
+                finalizeBatchPipelineFailure("Pipeline stopped by user.", "interrupted");
                 return;
             }
 
             appendRunLog(`[pipeline] ${step.label} failed.`, "stderr");
             setRunStatus(`Pipeline failed at ${step.label}.`, "bad");
+            finalizeBatchPipelineFailure(`Pipeline failed at ${step.label}.`, "failed");
             return;
         }
 
+        finalizeBatchPipelineSuccess();
         appendRunLog("[pipeline] All pipeline steps finished successfully.");
         setRunStatus("Pipeline completed successfully.", "ok");
     } finally {
@@ -2473,6 +3020,10 @@ function handleWorkflowState(payload) {
     }
 
     if (payload.type === "cookie-expired") {
+        finalizeBatchPipelineFailure(
+            payload.message || "MMF session expired during download.",
+            "interrupted"
+        );
         clearSessionFieldsInForm();
         scheduleSettingsSave();
         appendRunLog(`[session] ${payload.message || "MMF session expired and was cleared."}`, "stderr");
@@ -2558,6 +3109,36 @@ function handleWorkflowState(payload) {
 
 if (elements.autoLoadMyIdsBtn) {
     elements.autoLoadMyIdsBtn.addEventListener("click", autoLoadOwnModelIds);
+}
+
+if (elements.batchSizeSelect) {
+    elements.batchSizeSelect.addEventListener("change", () => {
+        setBatchSizeSelection(elements.batchSizeSelect.value);
+        updateBatchStatusUi();
+        setRunButtonsState();
+        scheduleSettingsSave();
+    });
+}
+
+if (elements.resetBatchProgressBtn) {
+    elements.resetBatchProgressBtn.addEventListener("click", () => {
+        if (isDownloadRootLocked()) {
+            setStatus("Cannot reset batch progress while a pipeline is active.", "warn");
+            return;
+        }
+
+        const confirmed = window.confirm("Reset completed batch progress for the current model selection?");
+        if (!confirmed) {
+            return;
+        }
+
+        batchProgressState = createDefaultBatchProgressState();
+        activeBatchPlan = null;
+        reconcileBatchProgressWithCurrentIds();
+        refreshDashboard();
+        scheduleSettingsSave();
+        setStatus("Batch progress has been reset.", "ok");
+    });
 }
 
 if (elements.openMmfLoginBtn) {
@@ -2697,13 +3278,43 @@ if (elements.browseFoldersPathBtn) {
 
 if (elements.browseDownloadRootBtn) {
     elements.browseDownloadRootBtn.addEventListener("click", async () => {
+        if (isDownloadRootLocked()) {
+            setStatus("Download folder cannot be changed while a pipeline is active.", "warn");
+            return;
+        }
+
         const selected = await pickDirectoryInto(elements.downloadRootInput, "Select download folder");
         if (!selected) {
             return;
         }
 
+        lastStableDownloadRoot = selected.trim();
+        rememberDownloadRoot(lastStableDownloadRoot, { save: false });
+        scheduleSettingsSave();
+
         await loadRuntimeInfo();
         await refreshModelJsonList();
+    });
+}
+
+if (elements.downloadHistoryList) {
+    elements.downloadHistoryList.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) {
+            return;
+        }
+
+        const openBtn = target.closest("button[data-path]");
+        if (!openBtn) {
+            return;
+        }
+
+        const pathValue = String(openBtn.dataset.path || "").trim();
+        if (!pathValue) {
+            return;
+        }
+
+        openPathFromUi(pathValue, "Saved download folder");
     });
 }
 
@@ -2758,6 +3369,9 @@ elements.depSkipBtn.addEventListener("click", () => {
 });
 
 elements.runExecuteBtn.addEventListener("click", executePipeline);
+if (elements.runNextBatchBtn) {
+    elements.runNextBatchBtn.addEventListener("click", executePipeline);
+}
 elements.runStep1Btn.addEventListener("click", () => startWorkflowStep("step1", "Step 1"));
 elements.runStep2TestBtn.addEventListener("click", () => startWorkflowStep("step2-test", "Step 2 Test"));
 elements.runStep2FullBtn.addEventListener("click", () => startWorkflowStep("step2-full", "Step 2 Full"));
@@ -2842,11 +3456,28 @@ document.querySelectorAll(".secret-toggle").forEach((button) => {
 
 if (elements.downloadRootInput) {
     elements.downloadRootInput.addEventListener("input", () => {
+        if (isDownloadRootLocked()) {
+            elements.downloadRootInput.value = lastStableDownloadRoot;
+            setStatus("Download folder cannot be changed while a pipeline is active.", "warn");
+            return;
+        }
+
         updatePathHelperHint();
         scheduleSettingsSave();
     });
 
     elements.downloadRootInput.addEventListener("change", async () => {
+        if (isDownloadRootLocked()) {
+            elements.downloadRootInput.value = lastStableDownloadRoot;
+            setStatus("Download folder cannot be changed while a pipeline is active.", "warn");
+            return;
+        }
+
+        lastStableDownloadRoot = elements.downloadRootInput.value.trim();
+        if (lastStableDownloadRoot) {
+            rememberDownloadRoot(lastStableDownloadRoot, { save: false });
+        }
+
         updatePathHelperHint();
         scheduleSettingsSave();
         await loadRuntimeInfo();
@@ -2899,6 +3530,7 @@ updatePathHelperHint();
 Promise.resolve()
     .then(() => loadCategoryTaxonomyFromDesktop())
     .then(() => loadSavedSettings())
+    .then(() => recoverInterruptedBatchState())
     .then(() => checkMmfSessionFromUi(true))
     .then(() => loadRuntimeInfo())
     .then(() => refreshModelJsonList())

@@ -66,6 +66,18 @@ const DEFAULT_SETTINGS = {
     mmfUsername: "",
     sessionCapturedAt: "",
     downloadRoot: "",
+    downloadRootHistory: [],
+    batchSizeSelection: "25",
+    batchProgress: {
+        completedIds: [],
+        inProgress: false,
+        inProgressIds: [],
+        startedAt: "",
+        lastCompletedAt: "",
+        lastStatus: "idle",
+        lastError: "",
+        lastRunDownloadRoot: ""
+    },
     testModeCheck: true,
     basePath: "",
     extractInPlace: true,
@@ -134,6 +146,9 @@ function sanitizeSettings(raw) {
             ? source.sessionCapturedAt.trim()
             : DEFAULT_SETTINGS.sessionCapturedAt,
         downloadRoot: typeof source.downloadRoot === "string" ? cleanInputPath(source.downloadRoot) : DEFAULT_SETTINGS.downloadRoot,
+        downloadRootHistory: sanitizeDownloadRootHistory(source.downloadRootHistory),
+        batchSizeSelection: sanitizeBatchSizeSelection(source.batchSizeSelection),
+        batchProgress: sanitizeBatchProgress(source.batchProgress),
         testModeCheck: typeof source.testModeCheck === "boolean" ? source.testModeCheck : DEFAULT_SETTINGS.testModeCheck,
         basePath: typeof source.basePath === "string" ? source.basePath : DEFAULT_SETTINGS.basePath,
         extractInPlace: typeof source.extractInPlace === "boolean" ? source.extractInPlace : DEFAULT_SETTINGS.extractInPlace,
@@ -242,6 +257,81 @@ function sanitizeCategorySelection(rawSelection) {
             subcategoryIds: [...subcategorySet]
         }))
         .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+const BATCH_SIZE_SELECTION_VALUES = ["25", "50", "100", "all"];
+const BATCH_STATUS_VALUES = ["idle", "running", "completed", "failed", "interrupted"];
+
+function sanitizeNumericIdList(rawIds) {
+    if (!Array.isArray(rawIds)) {
+        return [];
+    }
+
+    const seen = new Set();
+    const normalized = [];
+
+    rawIds.forEach((value) => {
+        const id = String(value || "").trim();
+        if (!/^\d+$/.test(id) || seen.has(id)) {
+            return;
+        }
+
+        seen.add(id);
+        normalized.push(id);
+    });
+
+    return normalized;
+}
+
+function sanitizeBatchSizeSelection(value) {
+    const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+    return BATCH_SIZE_SELECTION_VALUES.includes(normalized)
+        ? normalized
+        : DEFAULT_SETTINGS.batchSizeSelection;
+}
+
+function sanitizeDownloadRootHistory(rawHistory) {
+    if (!Array.isArray(rawHistory)) {
+        return [];
+    }
+
+    const seen = new Set();
+    const normalized = [];
+
+    rawHistory.forEach((entry) => {
+        const cleaned = cleanInputPath(String(entry || ""));
+        if (!cleaned) {
+            return;
+        }
+
+        const key = isWindows ? cleaned.toLowerCase() : cleaned;
+        if (seen.has(key)) {
+            return;
+        }
+
+        seen.add(key);
+        normalized.push(cleaned);
+    });
+
+    return normalized.slice(0, 25);
+}
+
+function sanitizeBatchProgress(rawProgress) {
+    const source = rawProgress && typeof rawProgress === "object" ? rawProgress : {};
+    const status = typeof source.lastStatus === "string" ? source.lastStatus.trim().toLowerCase() : "";
+
+    return {
+        completedIds: sanitizeNumericIdList(source.completedIds),
+        inProgress: typeof source.inProgress === "boolean" ? source.inProgress : false,
+        inProgressIds: sanitizeNumericIdList(source.inProgressIds),
+        startedAt: typeof source.startedAt === "string" ? source.startedAt.trim() : "",
+        lastCompletedAt: typeof source.lastCompletedAt === "string" ? source.lastCompletedAt.trim() : "",
+        lastStatus: BATCH_STATUS_VALUES.includes(status) ? status : DEFAULT_SETTINGS.batchProgress.lastStatus,
+        lastError: typeof source.lastError === "string" ? source.lastError.trim() : "",
+        lastRunDownloadRoot: typeof source.lastRunDownloadRoot === "string"
+            ? cleanInputPath(source.lastRunDownloadRoot)
+            : ""
+    };
 }
 
 function isSecretEncryptionAvailable() {

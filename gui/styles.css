@@ -427,6 +427,73 @@ select:focus {
     background: rgba(255, 255, 255, 0.58);
 }
 
+.model-tools-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+    gap: 10px;
+    margin: 0 0 10px;
+}
+
+.search-inline {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.search-inline input {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+#modelSearchInput,
+#modelSearchClearBtn {
+    pointer-events: auto;
+}
+
+.download-history-box {
+    margin-top: 8px;
+}
+
+.download-history-title {
+    margin-bottom: 6px;
+}
+
+.download-history-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 6px;
+}
+
+.download-history-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 9px;
+    border-radius: 10px;
+    border: 1px solid rgba(16, 35, 29, 0.1);
+    background: rgba(255, 255, 255, 0.76);
+}
+
+.download-history-path {
+    min-width: 0;
+    font-family: "IBM Plex Mono", "Consolas", monospace;
+    font-size: 0.76rem;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.download-history-empty {
+    color: var(--muted);
+    font-size: 0.82rem;
+    border: 1px dashed rgba(16, 35, 29, 0.16);
+    background: rgba(255, 255, 255, 0.55);
+}
+
 .category-section {
     margin: 2px 0 14px;
     padding: 10px 12px;
@@ -528,6 +595,15 @@ select:focus {
 
     .subcategory-list {
         grid-template-columns: 1fr;
+    }
+
+    .model-tools-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .search-inline {
+        flex-direction: column;
+        align-items: stretch;
     }
 }
 
@@ -680,6 +756,14 @@ select:focus {
 
 .model-id-row-duplicate .model-id-row-id {
     color: #8f5a00;
+}
+
+.model-id-row-completed {
+    background: rgba(30, 143, 73, 0.08);
+}
+
+.model-id-row-completed .model-id-row-id {
+    color: #176438;
 }
 
 .auth-actions {
@@ -948,6 +1032,10 @@ select:focus {
 }
 
 #runExecuteBtn {
+    grid-column: 1 / -1;
+}
+
+#runNextBatchBtn {
     grid-column: 1 / -1;
 }
 
